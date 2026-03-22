@@ -1,0 +1,68 @@
+[project]
+name = "utopia-sim"
+version = "0.1.0"
+description = "High-fidelity multi-agent simulation engine for market prediction and social dynamics"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Zhu Yi"}
+]
+keywords = ["multi-agent", "simulation", "market-prediction", "social-dynamics", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "networkx>=3.2",
+    "numpy>=1.24",
+    "pydantic>=2.0",
+    "structlog>=24.0",
+    "tenacity>=8.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+]
+llm = [
+    "aiohttp>=3.9",
+]
+all = [
+    "aiohttp>=3.9",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/anthropics-agents/utopia"
+Documentation = "https://github.com/anthropics-agents/utopia#readme"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["utopia"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
