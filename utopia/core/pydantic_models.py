@@ -438,6 +438,157 @@ class SimulationMetrics(BaseModel):
 
 
 # =============================================================================
+# L5: LLM Router Models (Capability-Based Routing)
+# =============================================================================
+
+
+class LLMModel(str, Enum):
+    """全旗舰模型池 - 各模型均为顶级配置，按专长分配
+
+    Model Pool:
+    - MINIMAX_M27: 主力底座，默认路由，处理复杂Agent协作
+    - DEEPSEEK_R1: 数学与逻辑审核，专攻纯逻辑推理
+    - KIMI_K25: 记忆档案馆，专攻超长文本无损压缩
+    - GLM_5: 世界法则裁判，担任RuleValidator
+    - QWEN_35_PLUS: 神经末梢，处理高频浅层交互
+    """
+
+    MINIMAX_M27 = "minimax-m2.7"
+    DEEPSEEK_R1 = "deepseek-r1"
+    KIMI_K25 = "kimi-k2.5"
+    GLM_5 = "glm-5"
+    QWEN_35_PLUS = "qwen-3.5-plus"
+
+
+class TaskType(str, Enum):
+    """任务类型决定模型路由
+
+    Routing Strategy:
+    - DEFAULT: 默认路由至 MINIMAX_M27
+    - BAYESIAN_STANCE_UPDATE: 贝叶斯立场更新 → DEEPSEEK_R1
+    - COGNITIVE_DISSONANCE: 认知失调处理 → DEEPSEEK_R1
+    - MEMORY_CONSOLIDATION: 记忆归并 → KIMI_K25
+    - LONG_CONTEXT_PARSE: 超长文本解析 → KIMI_K25 (context > 30K)
+    - RULE_VALIDATION: 规则校验 → GLM_5
+    - HIGH_FREQ_INTERACT: 高频浅层交互 → QWEN_35_PLUS
+    - INFO_PROPAGATION: 信息传播 → QWEN_35_PLUS
+    """
+
+    DEFAULT = "default"
+    BAYESIAN_STANCE_UPDATE = "bayesian_stance_update"
+    COGNITIVE_DISSONANCE = "cognitive_dissonance"
+    MEMORY_CONSOLIDATION = "memory_consolidation"
+    LONG_CONTEXT_PARSE = "long_context_parse"
+    RULE_VALIDATION = "rule_validation"
+    HIGH_FREQ_INTERACT = "high_freq_interact"
+    INFO_PROPAGATION = "info_propagation"
+
+
+class TaskRequest(BaseModel):
+    """LLM任务请求 (Capability-Based Routing)
+
+    Attributes:
+        task_id: 唯一任务ID
+        task_type: 任务类型决定路由
+        agent_id: 请求Agent ID
+        agent_importance: Agent重要性 [0, 1]
+        prompt: 提示词内容
+        context_length: 上下文长度(字节)
+        priority: 优先级(数值越大越优先)
+        timeout: 超时秒数
+        require_validation: 是否需要规则校验
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    task_id: str = Field(..., description="唯一任务ID")
+    task_type: TaskType = Field(default=TaskType.DEFAULT, description="任务类型决定路由")
+    agent_id: str = Field(..., description="请求Agent ID")
+    agent_importance: float = Field(default=0.5, ge=0.0, le=1.0, description="Agent重要性")
+    prompt: str = Field(..., min_length=1, description="提示词")
+    context_length: int = Field(default=0, ge=0, description="上下文长度")
+    priority: int = Field(default=0, description="优先级(高优先先执行)")
+    timeout: float = Field(default=30.0, gt=0.0, description="超时秒数")
+    require_validation: bool = Field(default=False, description="是否需要规则校验")
+
+    @field_validator("context_length")
+    @classmethod
+    def auto_detect_context_length(cls, v: int, info) -> int:
+        """如果未提供context_length，自动从prompt计算"""
+        if v == 0 and "prompt" in info.data:
+            return len(info.data["prompt"].encode("utf-8"))
+        return v
+
+
+class LLMResponse(BaseModel):
+    """LLM响应结果
+
+    Attributes:
+        task_id: 对应任务ID
+        success: 是否成功
+        model_used: 实际使用的模型
+        content: 响应内容
+        latency_ms: 延迟毫秒
+        tokens_used: Token使用量
+        retries: 重试次数
+        fallback_used: 是否使用了降级
+        error_message: 错误信息(失败时)
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    task_id: str = Field(..., description="对应任务ID")
+    success: bool = Field(..., description="是否成功")
+    model_used: LLMModel = Field(..., description="实际使用的模型")
+    content: str = Field(default="", description="响应内容")
+    latency_ms: float = Field(..., ge=0.0, description="延迟毫秒")
+    tokens_used: int = Field(default=0, ge=0, description="Token使用量")
+    retries: int = Field(default=0, ge=0, description="重试次数")
+    fallback_used: bool = Field(default=False, description="是否使用了降级")
+    error_message: str = Field(default="", description="错误信息")
+
+
+class ModelCapability(BaseModel):
+    """模型能力配置
+
+    Attributes:
+        model: 模型枚举
+        specialties: 专长任务类型列表
+        context_window: 上下文窗口大小
+        max_concurrent: 最大并发数
+        provider: API提供商名称
+        api_key_env: API Key环境变量名
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    model: LLMModel = Field(..., description="模型")
+    specialties: list[TaskType] = Field(default_factory=list, description="专长任务类型")
+    context_window: int = Field(..., ge=1000, description="上下文窗口大小")
+    max_concurrent: int = Field(..., ge=1, description="最大并发数")
+    provider: str = Field(..., description="API提供商")
+    api_key_env: str = Field(..., description="API Key环境变量名")
+
+
+class RouterStats(BaseModel):
+    """LLM Router统计信息"""
+
+    model_config = ConfigDict(frozen=False)
+
+    total_requests: int = Field(default=0, ge=0, description="总请求数")
+    successful_requests: int = Field(default=0, ge=0, description="成功请求数")
+    failed_requests: int = Field(default=0, ge=0, description="失败请求数")
+    fallback_requests: int = Field(default=0, ge=0, description="降级请求数")
+    total_latency_ms: float = Field(default=0.0, ge=0.0, description="总延迟")
+    model_distribution: dict[LLMModel, int] = Field(
+        default_factory=dict, description="模型使用分布"
+    )
+    task_type_distribution: dict[TaskType, int] = Field(
+        default_factory=dict, description="任务类型分布"
+    )
+
+
+# =============================================================================
 # Utility Functions
 # =============================================================================
 

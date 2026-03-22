@@ -22,6 +22,13 @@ from utopia.core.pydantic_models import (
     ActionBufferEntry,
     AsyncLLMCall,
     SimulationMetrics,
+    # LLM Router models
+    LLMModel,
+    TaskType,
+    TaskRequest,
+    LLMResponse,
+    ModelCapability,
+    RouterStats,
 )
 
 __all__ = [
@@ -42,4 +49,11 @@ __all__ = [
     "ActionBufferEntry",
     "AsyncLLMCall",
     "SimulationMetrics",
+    # LLM Router
+    "LLMModel",
+    "TaskType",
+    "TaskRequest",
+    "LLMResponse",
+    "ModelCapability",
+    "RouterStats",
 ]
