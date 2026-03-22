@@ -33,6 +33,13 @@ from utopia.layer5_engine.async_llm_scheduler import (
 from utopia.layer5_engine.action_buffer import ActionBuffer, BufferedAction
 from utopia.layer5_engine.event_injector import ExternalEventInjector, ExternalEvent
 from utopia.layer5_engine.convergence import ConvergenceDetector, ConvergenceResult
+from utopia.layer5_engine.mailbox import (
+    Mailbox,
+    MessageBroker,
+    MessagePriority,
+    ActiveTaskPool,
+    TickProcessor,
+)
 
 __all__ = [
     "SimulationEngine",
@@ -56,4 +63,9 @@ __all__ = [
     "ExternalEvent",
     "ConvergenceDetector",
     "ConvergenceResult",
+    "Mailbox",
+    "MessageBroker",
+    "MessagePriority",
+    "ActiveTaskPool",
+    "TickProcessor",
 ]

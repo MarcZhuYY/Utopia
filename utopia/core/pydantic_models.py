@@ -362,6 +362,81 @@ class PropagationBatch(BaseModel):
 # =============================================================================
 
 
+class ActivityStatus(str, Enum):
+    """Agent活动状态 - 用于唤醒/睡眠机制
+
+    状态转换规则:
+    - SLEEPING: Delta < 0.15, 仅执行静默贝叶斯更新
+    - ROUTINE: 0.15 <= Delta < 0.4, 标准LLM调用
+    - AWAKE_CRITICAL: Delta >= 0.4, 深度推理 (ToT/CoT)
+    """
+
+    SLEEPING = "sleeping"
+    ROUTINE = "routine"
+    AWAKE_CRITICAL = "awake_critical"
+
+
+class AgentRuntimeState(BaseModel):
+    """Agent运行时状态 - 扩展AgentState用于唤醒机制
+
+    Attributes:
+        activity_status: 当前活动状态
+        silent_ticks: 连续睡眠tick数
+        last_active_tick: 上次活跃tick
+        mailbox_message_count: 当前邮箱消息数
+    """
+
+    model_config = ConfigDict(frozen=False)
+
+    activity_status: ActivityStatus = Field(
+        default=ActivityStatus.ROUTINE, description="当前活动状态"
+    )
+    silent_ticks: int = Field(default=0, ge=0, description="连续睡眠tick数")
+    last_active_tick: int = Field(default=0, ge=0, description="上次活跃tick")
+    mailbox_message_count: int = Field(default=0, ge=0, description="邮箱消息数")
+
+
+class CognitiveDissonanceInput(BaseModel):
+    """认知失调度计算输入
+
+    公式: Delta = |Message_Stance - Agent_Stance| * Sender_Trust * Message_Importance
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    message_stance: float = Field(..., ge=-1.0, le=1.0, description="消息立场 S_m")
+    agent_stance: float = Field(..., ge=-1.0, le=1.0, description="Agent立场 S_i")
+    sender_trust: float = Field(..., ge=0.0, le=1.0, description="发送者信任度 T_ij")
+    message_importance: float = Field(..., ge=0.0, le=1.0, description="消息重要性 I_m")
+
+    def compute_delta(self) -> float:
+        """计算认知失调度 Delta"""
+        stance_diff = abs(self.message_stance - self.agent_stance)
+        return stance_diff * self.sender_trust * self.message_importance
+
+    def determine_activity_status(self, threshold_low: float = 0.15, threshold_high: float = 0.4) -> ActivityStatus:
+        """根据Delta确定活动状态"""
+        delta = self.compute_delta()
+        if delta < threshold_low:
+            return ActivityStatus.SLEEPING
+        elif delta < threshold_high:
+            return ActivityStatus.ROUTINE
+        else:
+            return ActivityStatus.AWAKE_CRITICAL
+
+
+class WakeUpDecision(BaseModel):
+    """唤醒决策结果"""
+
+    model_config = ConfigDict(frozen=True)
+
+    target_status: ActivityStatus = Field(..., description="目标活动状态")
+    max_delta: float = Field(..., ge=0.0, description="最大认知失调度")
+    critical_messages: list[str] = Field(default_factory=list, description="需深度处理的消息ID")
+    force_wake: bool = Field(default=False, description="是否强制唤醒")
+    reason: str = Field(default="", description="决策原因")
+
+
 class WorldStateSnapshot(BaseModel):
     """Immutable snapshot of world state at a specific tick.
 

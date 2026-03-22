@@ -12,6 +12,11 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from utopia.core.config import SimulationConfig
 from utopia.core.models import Action, Message, ReceivedMessage
+from utopia.core.pydantic_models import (
+    ActivityStatus,
+    CognitiveDissonanceInput,
+    WakeUpDecision,
+)
 from utopia.layer3_cognition.memory import MemorySystem
 
 if TYPE_CHECKING:
@@ -89,6 +94,161 @@ class AgentDecisionEngine:
             config: Simulation configuration
         """
         self.config = config or SimulationConfig()
+
+        # Wake/Sleep mechanism thresholds
+        self.WAKE_THRESHOLD_LOW = 0.15  # SLEEPING -> ROUTINE
+        self.WAKE_THRESHOLD_HIGH = 0.4  # ROUTINE -> AWAKE_CRITICAL
+
+    def perceive_and_filter(
+        self,
+        agent: Agent,
+        inbox_messages: list[ReceivedMessage],
+        force_wake: bool = False,
+    ) -> WakeUpDecision:
+        """Perceive messages and determine activity status before LLM call.
+
+        This is the wake/sleep interception point. It calculates cognitive
+        dissonance for each message and determines if agent should:
+        - SLEEPING: Delta < 0.15, silent Bayesian update only
+        - ROUTINE: 0.15 <= Delta < 0.4, standard LLM call
+        - AWAKE_CRITICAL: Delta >= 0.4, deep reasoning
+
+        Formula: Delta = |Message_Stance - Agent_Stance| * Sender_Trust * Message_Importance
+
+        Args:
+            agent: Agent receiving messages
+            inbox_messages: Messages in agent's mailbox
+            force_wake: Whether to force wake (external event or max silent ticks)
+
+        Returns:
+            WakeUpDecision: Target activity status and critical messages
+        """
+        if not inbox_messages:
+            return WakeUpDecision(
+                target_status=ActivityStatus.SLEEPING,
+                max_delta=0.0,
+                critical_messages=[],
+                force_wake=force_wake,
+                reason="No messages",
+            )
+
+        max_delta = 0.0
+        critical_message_ids = []
+        message_deltas = []
+
+        for msg in inbox_messages:
+            # Get agent's current stance on the topic
+            agent_stance = agent.get_stance(msg.message.topic_id)
+            agent_stance_pos = agent_stance.position if agent_stance else 0.0
+
+            # Get sender trust
+            sender_trust = agent.get_trust(msg.from_agent)
+
+            # Message importance (default to 0.5 if not specified)
+            msg_importance = getattr(msg, "importance", 0.5)
+
+            # Calculate cognitive dissonance
+            dissonance_input = CognitiveDissonanceInput(
+                message_stance=msg.message.original_stance,
+                agent_stance=agent_stance_pos,
+                sender_trust=sender_trust,
+                message_importance=msg_importance,
+            )
+
+            delta = dissonance_input.compute_delta()
+            max_delta = max(max_delta, delta)
+            message_deltas.append((msg, delta))
+
+            # Track critical messages (Delta >= 0.4)
+            if delta >= self.WAKE_THRESHOLD_HIGH:
+                # Use message_id if available, otherwise use hash of content
+                msg_id = getattr(msg.message, 'message_id', None) or f"msg_{hash(msg.message.content)}"
+                critical_message_ids.append(msg_id)
+
+        # Determine target status
+        if force_wake:
+            target_status = ActivityStatus.AWAKE_CRITICAL
+            reason = f"Force wake (max_delta={max_delta:.3f})"
+        elif max_delta < self.WAKE_THRESHOLD_LOW:
+            target_status = ActivityStatus.SLEEPING
+            reason = f"Low delta ({max_delta:.3f} < {self.WAKE_THRESHOLD_LOW})"
+        elif max_delta < self.WAKE_THRESHOLD_HIGH:
+            target_status = ActivityStatus.ROUTINE
+            reason = f"Medium delta ({max_delta:.3f})"
+        else:
+            target_status = ActivityStatus.AWAKE_CRITICAL
+            reason = f"High delta ({max_delta:.3f} >= {self.WAKE_THRESHOLD_HIGH})"
+
+        return WakeUpDecision(
+            target_status=target_status,
+            max_delta=max_delta,
+            critical_messages=critical_message_ids,
+            force_wake=force_wake,
+            reason=reason,
+        )
+
+    def silent_update(
+        self,
+        agent: Agent,
+        messages: list[ReceivedMessage],
+    ) -> None:
+        """Perform silent Bayesian updates without LLM calls.
+
+        Used when agent is in SLEEPING state. Updates beliefs but
+        doesn't generate responses.
+
+        Args:
+            agent: Agent to update
+            messages: Messages to process
+        """
+        from utopia.layer3_cognition.beliefs_v2 import BayesianBeliefSystem
+
+        for msg in messages:
+            # Get current stance
+            agent_stance = agent.get_stance(msg.message.topic_id)
+            agent_stance_pos = agent_stance.position if agent_stance else 0.0
+            agent_confidence = agent_stance.confidence if agent_stance else 0.5
+
+            # Get sender trust
+            sender_trust = agent.get_trust(msg.from_agent)
+
+            # Get openness from BigFive traits (handle both traits dict and big_five object)
+            if hasattr(agent.persona, 'big_five') and agent.persona.big_five:
+                openness = agent.persona.big_five.openness
+            elif hasattr(agent.persona, 'traits') and agent.persona.traits:
+                openness = agent.persona.traits.get('openness', 0.5)
+            else:
+                openness = 0.5
+
+            # Calculate delta for Bayesian update
+            delta = (msg.message.original_stance - agent_stance_pos) * sender_trust * 0.3
+
+            # Silent update with reduced intensity (0.3 factor)
+            new_stance = agent_stance_pos + delta * (1 - agent_confidence) * openness
+            new_stance = max(-1.0, min(1.0, new_stance))
+
+            # Update confidence
+            if delta * agent_stance_pos > 0:  # Same direction
+                new_confidence = agent_confidence + (1 - agent_confidence) * sender_trust * 0.1
+            else:  # Opposite direction
+                new_confidence = agent_confidence - (1 - agent_confidence) * (1 - openness) * 0.05
+            new_confidence = max(0.0, min(1.0, new_confidence))
+
+            # Apply update via belief system
+            if hasattr(agent.beliefs, 'update_stance'):
+                agent.beliefs.update_stance(
+                    topic_id=msg.message.topic_id,
+                    new_position=new_stance,
+                    new_confidence=new_confidence,
+                )
+
+            # Add to memory with reduced importance
+            agent.add_memory(
+                content=msg.message.content,
+                topic_id=msg.message.topic_id,
+                importance=0.3 * getattr(msg, "importance", 0.5),
+                source_agent=msg.from_agent,
+            )
 
     def decide(
         self,

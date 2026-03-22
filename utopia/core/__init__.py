@@ -29,6 +29,11 @@ from utopia.core.pydantic_models import (
     LLMResponse,
     ModelCapability,
     RouterStats,
+    # Wake/Sleep mechanism
+    ActivityStatus,
+    AgentRuntimeState,
+    CognitiveDissonanceInput,
+    WakeUpDecision,
 )
 
 __all__ = [
@@ -56,4 +61,9 @@ __all__ = [
     "LLMResponse",
     "ModelCapability",
     "RouterStats",
+    # Wake/Sleep mechanism
+    "ActivityStatus",
+    "AgentRuntimeState",
+    "CognitiveDissonanceInput",
+    "WakeUpDecision",
 ]

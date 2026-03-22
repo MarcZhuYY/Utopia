@@ -17,6 +17,7 @@ from utopia.core.models import (
     Persona,
     Stance,
 )
+from utopia.core.pydantic_models import ActivityStatus
 from utopia.layer3_cognition.memory import MemorySystem
 from utopia.layer3_cognition.beliefs import BeliefSystem
 
@@ -37,6 +38,8 @@ class Agent:
         beliefs: Belief system
         state: Current state
         relationship_map: Reference to relationship network
+        activity_status: Current activity status (SLEEPING/ROUTINE/AWAKE_CRITICAL)
+        silent_ticks: Number of consecutive silent ticks
     """
 
     id: str = field(default_factory=lambda: f"A{uuid.uuid4().hex[:8]}")
@@ -45,6 +48,8 @@ class Agent:
     beliefs: BeliefSystem = field(default_factory=BeliefSystem)
     state: AgentState = field(default_factory=AgentState)
     _relationship_map: Optional[Any] = field(default=None, repr=False)
+    activity_status: ActivityStatus = field(default=ActivityStatus.ROUTINE)
+    silent_ticks: int = field(default=0)
 
     def __post_init__(self):
         """Initialize defaults if not set."""
@@ -219,3 +224,71 @@ class Agent:
         agent.beliefs.initialize_stances(base_stances)
 
         return agent
+
+    def set_activity_status(self, status: ActivityStatus, current_tick: int = 0) -> None:
+        """Set agent activity status.
+
+        Args:
+            status: New activity status
+            current_tick: Current simulation tick
+        """
+        old_status = self.activity_status
+        self.activity_status = status
+
+        if status == ActivityStatus.SLEEPING:
+            self.silent_ticks += 1
+        else:
+            if old_status == ActivityStatus.SLEEPING:
+                # Waking up from sleep
+                self.silent_ticks = 0
+
+    def should_force_wake(self, max_silent_ticks: int = 10) -> bool:
+        """Check if agent should be force-woken.
+
+        Args:
+            max_silent_ticks: Maximum silent ticks before force wake
+
+        Returns:
+            bool: True if should force wake
+        """
+        return self.silent_ticks >= max_silent_ticks
+
+    def silent_update_beliefs(self, topic_id: str, delta: float, sender_trust: float) -> None:
+        """Silently update beliefs (for SLEEPING state).
+
+        Performs Bayesian update without LLM call.
+
+        Args:
+            topic_id: Topic to update
+            delta: Stance delta
+            sender_trust: Trust in message sender
+        """
+        from utopia.core.pydantic_models import BigFiveTraits
+
+        # Get current stance
+        stance = self.get_stance(topic_id)
+        current_pos = stance.position if stance else 0.0
+        current_conf = stance.confidence if stance else 0.5
+
+        # Get openness from BigFive traits (default 0.5)
+        if hasattr(self.persona, 'big_five') and self.persona.big_five:
+            openness = self.persona.big_five.openness
+        else:
+            openness = 0.5
+
+        # Apply delta with openness and confidence modulation
+        new_pos = current_pos + delta * (1 - current_conf) * openness
+        new_pos = max(-1.0, min(1.0, new_pos))
+
+        # Update confidence
+        if delta * current_pos > 0:  # Same direction
+            new_conf = current_conf + (1 - current_conf) * sender_trust * 0.1
+        else:  # Opposite direction
+            new_conf = current_conf - (1 - current_conf) * (1 - openness) * 0.05
+        new_conf = max(0.0, min(1.0, new_conf))
+
+        # Update via belief system if method exists
+        if hasattr(self.beliefs, 'update_stance'):
+            self.beliefs.update_stance(topic_id, new_pos, new_conf)
+        elif hasattr(self.beliefs, 'set_stance'):
+            self.beliefs.set_stance(topic_id, new_pos, new_conf)
