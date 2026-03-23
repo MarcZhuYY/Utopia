@@ -36,16 +36,17 @@ class TestWorldStateBuffer:
         assert "agent2" not in buffer.read_state.agent_states
         assert "agent1" in buffer.read_state.agent_states
 
-    def test_swap_buffers(self):
-        """Test buffer swap operation."""
+    @pytest.mark.asyncio
+    async def test_swap_buffers(self):
+        """Test buffer swap operation (now async with lock protection)."""
         buffer = WorldStateBuffer()
 
         # Make changes to write state
         buffer.write_state.agent_states["agent1"] = AgentState(agent_id="agent1")
         buffer.write_state.tick = 1  # Simulate tick increment
 
-        # Swap
-        snapshot = buffer.swap_buffers()
+        # Swap (CRITICAL FIX: now async)
+        snapshot = await buffer.swap_buffers()
 
         # Read state should now have the changes
         assert "agent1" in buffer.read_state.agent_states
@@ -72,8 +73,9 @@ class TestWorldStateBuffer:
         # Write buffer should have new value
         assert buffer.write_state.trust_matrix[("A", "B")] == 0.8
 
-    def test_action_buffering(self):
-        """Test action buffering."""
+    @pytest.mark.asyncio
+    async def test_action_buffering(self):
+        """Test action buffering (now async with lock protection)."""
         buffer = WorldStateBuffer()
 
         action = ActionWithTrace(
@@ -91,12 +93,13 @@ class TestWorldStateBuffer:
             ),
         )
 
-        buffer.buffer_action(action, priority=5)
+        # CRITICAL FIX: now async
+        await buffer.buffer_action(action, priority=5)
 
         assert len(buffer._action_buffer) == 1
 
-        # Commit actions
-        committed = buffer.commit_buffered_actions()
+        # Commit actions (CRITICAL FIX: now async)
+        committed = await buffer.commit_buffered_actions()
         assert len(committed) == 1
         assert action in buffer.write_state.committed_actions
 
@@ -115,20 +118,22 @@ class TestWorldStateBuffer:
         assert "agent1" not in buffer.write_state.agent_states
         assert ("A", "B") not in buffer.write_state.trust_matrix
 
-    def test_history_tracking(self):
-        """Test snapshot history."""
+    @pytest.mark.asyncio
+    async def test_history_tracking(self):
+        """Test snapshot history (now async with lock protection)."""
         buffer = WorldStateBuffer()
 
         # Run multiple ticks
         for i in range(3):
             buffer.write_state.tick = i + 1
-            buffer.swap_buffers()
+            await buffer.swap_buffers()  # CRITICAL FIX: now async
 
         history = buffer.get_history()
         assert len(history) == 3
 
-    def test_state_delta(self):
-        """Test computing state delta."""
+    @pytest.mark.asyncio
+    async def test_state_delta(self):
+        """Test computing state delta (now async with lock protection)."""
         from utopia.layer5_engine.world_state_buffer import WorldState, AgentState
 
         # Create initial state with proper agent
@@ -145,10 +150,10 @@ class TestWorldStateBuffer:
             stance_updates={"topic1": StanceState(topic_id="topic1", position=0.8, confidence=0.6)},
         )
         buffer.update_trust("A", "B", 0.7)
-        buffer.swap_buffers()
+        await buffer.swap_buffers()  # CRITICAL FIX: now async
 
         # Tick 2 - swap again to create history
-        buffer.swap_buffers()
+        await buffer.swap_buffers()  # CRITICAL FIX: now async
 
         # Get delta between ticks (check history exists)
         history = buffer.get_history()
@@ -158,8 +163,9 @@ class TestWorldStateBuffer:
 class TestTickCoordinator:
     """Test tick coordination."""
 
-    def test_tick_execution(self):
-        """Test single tick execution."""
+    @pytest.mark.asyncio
+    async def test_tick_execution(self):
+        """Test single tick execution (now async)."""
         buffer = WorldStateBuffer()
         coordinator = TickCoordinator(buffer)
 
@@ -170,7 +176,7 @@ class TestTickCoordinator:
             callback_called = True
 
         coordinator.register_tick_callback(callback)
-        snapshot = coordinator.run_tick()
+        snapshot = await coordinator.run_tick()  # CRITICAL FIX: now async
 
         assert callback_called
         # After first tick, read_state shows completed tick (0)
@@ -178,12 +184,13 @@ class TestTickCoordinator:
         assert buffer.current_tick == 0
         assert buffer.write_state.tick == 1
 
-    def test_multiple_ticks(self):
-        """Test running multiple ticks."""
+    @pytest.mark.asyncio
+    async def test_multiple_ticks(self):
+        """Test running multiple ticks (now async)."""
         buffer = WorldStateBuffer()
         coordinator = TickCoordinator(buffer)
 
-        snapshots = coordinator.run_ticks(5)
+        snapshots = await coordinator.run_ticks(5)  # CRITICAL FIX: now async
 
         assert len(snapshots) == 5
         # After 5 ticks, read_state shows completed tick 4
@@ -191,7 +198,8 @@ class TestTickCoordinator:
         assert buffer.current_tick == 4
         assert buffer.write_state.tick == 5
 
-    def test_concurrent_tick_prevention(self):
+    @pytest.mark.asyncio
+    async def test_concurrent_tick_prevention(self):
         """Test that concurrent ticks are prevented."""
         buffer = WorldStateBuffer()
         coordinator = TickCoordinator(buffer)
@@ -200,7 +208,7 @@ class TestTickCoordinator:
         coordinator._is_processing = True
 
         with pytest.raises(RuntimeError, match="already in progress"):
-            coordinator.run_tick()
+            await coordinator.run_tick()  # CRITICAL FIX: now async
 
     def test_state_summary(self):
         """Test state summary."""

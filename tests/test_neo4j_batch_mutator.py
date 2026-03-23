@@ -243,7 +243,9 @@ async def test_transaction_rollback_on_error(mock_mutator):
     with pytest.raises(Neo4jBatchError):
         await mock_mutator.flush_events(events)
 
-    assert MockTransaction.rollback_count == 1
+    # CRITICAL FIX: With retry mechanism (3 attempts), rollback is called 3 times
+    # (once per failed attempt before retry)
+    assert MockTransaction.rollback_count == 3
 
 
 @pytest.mark.asyncio

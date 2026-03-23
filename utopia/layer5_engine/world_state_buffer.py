@@ -13,6 +13,7 @@ making decisions, eliminating order-dependent artifacts.
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -136,6 +137,10 @@ class WorldStateBuffer:
         # Pending action buffer
         self._action_buffer: list[ActionBufferEntry] = []
 
+        # CRITICAL FIX: Add locks for thread-safe operations
+        self._buffer_lock = asyncio.Lock()  # Protects buffer swap operations
+        self._action_lock = asyncio.Lock()  # Protects action buffer
+
     @property
     def read_state(self) -> WorldState:
         """Get read-only state for current tick.
@@ -222,12 +227,14 @@ class WorldStateBuffer:
             np.clip(new_trust, -1.0, 1.0)
         )
 
-    def buffer_action(
+    async def buffer_action(
         self,
         action: ActionWithTrace,
         priority: int = 0,
     ) -> None:
         """Buffer an action for next tick.
+
+        CRITICAL FIX: Now async with proper locking for thread safety.
 
         Args:
             action: Action to buffer
@@ -238,25 +245,31 @@ class WorldStateBuffer:
             source_tick=self.current_tick,
             priority=priority,
         )
-        self._action_buffer.append(entry)
 
-        # Keep sorted by priority
-        self._action_buffer.sort(key=lambda e: e.priority, reverse=True)
+        # CRITICAL FIX: Thread-safe action buffering
+        async with self._action_lock:
+            self._action_buffer.append(entry)
+            # Keep sorted by priority
+            self._action_buffer.sort(key=lambda e: e.priority, reverse=True)
 
-    def commit_buffered_actions(self) -> list[ActionWithTrace]:
+    async def commit_buffered_actions(self) -> list[ActionWithTrace]:
         """Commit all buffered actions to write state.
+
+        CRITICAL FIX: Now async with proper locking for thread safety.
 
         Returns:
             List of committed actions
         """
         committed = []
 
-        for entry in self._action_buffer:
-            self._write_state.committed_actions.append(entry.action)
-            committed.append(entry.action)
+        # CRITICAL FIX: Thread-safe action commit
+        async with self._action_lock:
+            for entry in self._action_buffer:
+                self._write_state.committed_actions.append(entry.action)
+                committed.append(entry.action)
 
-        self._action_buffer.clear()
-        return committed
+            self._action_buffer.clear()
+            return committed
 
     def log_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Log an event to write buffer.
@@ -271,37 +284,41 @@ class WorldStateBuffer:
             **data,
         })
 
-    def swap_buffers(self) -> WorldStateSnapshot:
+    async def swap_buffers(self) -> WorldStateSnapshot:
         """Swap read and write buffers atomically.
+
+        CRITICAL FIX: Now async with proper locking to ensure true atomicity.
 
         This is the critical operation that ensures causal consistency:
         1. Archive current read state to history
-        2. Swap read/write pointers
+        2. Swap read/write pointers (under lock)
         3. Reset write state as copy of new read state
         4. Increment tick in write state
 
         Returns:
             Snapshot of committed state
         """
-        # Archive current read state
-        snapshot = self._read_state.to_snapshot()
-        self._history.append(snapshot)
+        # CRITICAL FIX: Atomic buffer swap under lock
+        async with self._buffer_lock:
+            # Archive current read state
+            snapshot = self._read_state.to_snapshot()
+            self._history.append(snapshot)
 
-        # Trim history if needed
-        if len(self._history) > self._max_history:
-            self._history.pop(0)
+            # Trim history if needed
+            if len(self._history) > self._max_history:
+                self._history.pop(0)
 
-        # Swap buffers
-        self._read_state = self._write_state
+            # Swap buffers atomically
+            self._read_state = self._write_state
 
-        # Create new write state as copy with incremented tick
-        self._write_state = self._read_state.copy()
-        self._write_state.tick += 1
-        self._write_state.pending_actions.clear()
-        self._write_state.committed_actions.clear()
-        self._write_state.event_log.clear()
+            # Create new write state as copy with incremented tick
+            self._write_state = self._read_state.copy()
+            self._write_state.tick += 1
+            self._write_state.pending_actions.clear()
+            self._write_state.committed_actions.clear()
+            self._write_state.event_log.clear()
 
-        return snapshot
+            return snapshot
 
     def rollback_write_buffer(self) -> None:
         """Rollback write buffer to match read buffer.
@@ -415,15 +432,17 @@ class TickCoordinator:
         """
         self._tick_callbacks.append(callback)
 
-    def run_tick(self) -> WorldStateSnapshot:
+    async def run_tick(self) -> WorldStateSnapshot:
         """Execute single simulation tick.
+
+        CRITICAL FIX: Now async to support atomic buffer operations.
 
         Flow:
         1. All agents read from read_state (consistent view)
         2. All agents write to write_state (isolated changes)
         3. Run callbacks
-        4. Commit buffered actions
-        5. Swap buffers atomically
+        4. Commit buffered actions (awaited for thread safety)
+        5. Swap buffers atomically (awaited with lock)
 
         Returns:
             Snapshot of committed state
@@ -438,19 +457,21 @@ class TickCoordinator:
             for callback in self._tick_callbacks:
                 callback(self.buffer)
 
-            # Commit all buffered actions
-            self.buffer.commit_buffered_actions()
+            # CRITICAL FIX: Await async commit
+            await self.buffer.commit_buffered_actions()
 
-            # Swap buffers to complete tick
-            snapshot = self.buffer.swap_buffers()
+            # CRITICAL FIX: Await async buffer swap with lock protection
+            snapshot = await self.buffer.swap_buffers()
 
             return snapshot
 
         finally:
             self._is_processing = False
 
-    def run_ticks(self, n: int) -> list[WorldStateSnapshot]:
+    async def run_ticks(self, n: int) -> list[WorldStateSnapshot]:
         """Run multiple ticks.
+
+        CRITICAL FIX: Now async to support atomic buffer operations.
 
         Args:
             n: Number of ticks to run
@@ -460,7 +481,7 @@ class TickCoordinator:
         """
         snapshots = []
         for _ in range(n):
-            snapshot = self.run_tick()
+            snapshot = await self.run_tick()
             snapshots.append(snapshot)
         return snapshots
 

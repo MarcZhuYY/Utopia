@@ -144,7 +144,7 @@ class SimulationEngineCQRS:
                 total_events += len(events)
 
         # ========== Phase 3: COMMIT (Batch write) ==========
-        events_to_flush = self.event_buffer.drain(tick_number)
+        events_to_flush = await self.event_buffer.drain(tick_number)
 
         commit_duration = 0.0
         committed_count = 0

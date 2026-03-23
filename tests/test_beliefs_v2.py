@@ -7,6 +7,7 @@ from utopia.core.pydantic_models import BigFiveTraits, StanceState
 from utopia.layer3_cognition.beliefs_v2 import (
     BayesianBeliefSystem,
     BayesianBeliefDelta,
+    _sanitize_float,
     compute_belief_distance,
 )
 
@@ -260,3 +261,101 @@ class TestStanceState:
                 position=1.5,  # Exceeds maximum
                 confidence=0.5,
             )
+
+
+class TestSanitizeFloat:
+    """Test NaN/Inf sanitization helper."""
+
+    def test_normal_value_passes_through(self):
+        """Normal values should be unchanged."""
+        assert _sanitize_float(0.5) == 0.5
+        assert _sanitize_float(-0.5) == -0.5
+        assert _sanitize_float(0.0) == 0.0
+
+    def test_nan_replaced_with_default(self):
+        """NaN should be replaced with default value."""
+        result = _sanitize_float(float('nan'), default=0.5)
+        assert not np.isnan(result)
+        assert result == 0.5
+
+    def test_inf_replaced_with_default(self):
+        """Inf should be replaced with default value."""
+        result = _sanitize_float(float('inf'), default=0.5, bounds=(0.0, 1.0))
+        assert not np.isinf(result)
+        assert result == 0.5
+
+    def test_neg_inf_replaced_with_default(self):
+        """-Inf should be replaced with default value."""
+        result = _sanitize_float(float('-inf'), default=0.5, bounds=(0.0, 1.0))
+        assert not np.isinf(result)
+        assert result == 0.5
+
+    def test_bounds_enforcement(self):
+        """Values should be clipped to bounds."""
+        assert _sanitize_float(1.5, bounds=(-1.0, 1.0)) == 1.0
+        assert _sanitize_float(-1.5, bounds=(-1.0, 1.0)) == -1.0
+
+    def test_bayesian_update_with_nan_inputs(self):
+        """Bayesian update should handle NaN inputs gracefully."""
+        system = BayesianBeliefSystem()
+        system.initialize_stance("topic1", position=0.0, confidence=0.5)
+
+        # Update with NaN message stance - should use default (0.0)
+        result = system.bayesian_update(
+            topic_id="topic1",
+            message_stance=float('nan'),
+            intensity=0.5,
+            trust_in_sender=0.6,
+            current_tick=1,
+        )
+
+        # Should not crash, position should change minimally
+        assert not np.isnan(result.new_position)
+        assert -1.0 <= result.new_position <= 1.0
+
+    def test_bayesian_update_with_inf_inputs(self):
+        """Bayesian update should handle Inf inputs gracefully."""
+        system = BayesianBeliefSystem()
+        system.initialize_stance("topic1", position=0.0, confidence=0.5)
+
+        # Update with Inf intensity - should be clamped
+        result = system.bayesian_update(
+            topic_id="topic1",
+            message_stance=0.5,
+            intensity=float('inf'),
+            trust_in_sender=0.6,
+            current_tick=1,
+        )
+
+        # Should not crash, intensity should be clamped to [0, 1]
+        assert not np.isnan(result.new_position)
+        assert not np.isinf(result.new_position)
+        assert -1.0 <= result.new_position <= 1.0
+
+    def test_initialize_stance_with_nan(self):
+        """Stance initialization should sanitize NaN inputs."""
+        system = BayesianBeliefSystem()
+
+        stance = system.initialize_stance(
+            "topic1",
+            position=float('nan'),
+            confidence=float('nan'),
+        )
+
+        # Should use defaults
+        assert stance.position == 0.0
+        assert stance.confidence == 0.5
+
+    def test_initialize_stance_with_inf(self):
+        """Stance initialization should sanitize Inf inputs."""
+        system = BayesianBeliefSystem()
+
+        stance = system.initialize_stance(
+            "topic1",
+            position=float('inf'),
+            confidence=float('inf'),
+        )
+
+        # Should use defaults within bounds
+        assert -1.0 <= stance.position <= 1.0
+        assert 0.0 <= stance.confidence <= 1.0

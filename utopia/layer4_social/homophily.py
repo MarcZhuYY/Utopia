@@ -26,6 +26,31 @@ from utopia.core.pydantic_models import (
 if TYPE_CHECKING:
     from utopia.layer4_social.network import SocialNetwork
 
+# SAFETY FIX: Epsilon for safe division
+_EPSILON = 1e-10
+
+
+def _sanitize_stance(
+    value: float,
+    default: float = 0.0,
+    bounds: tuple[float, float] = (-1.0, 1.0)
+) -> float:
+    """Sanitize stance value to prevent NaN/Inf.
+
+    SAFETY FIX: Prevents invalid stance values from corrupting homophily calculations.
+
+    Args:
+        value: Input stance value
+        default: Default if NaN/Inf
+        bounds: Valid range (min, max)
+
+    Returns:
+        Sanitized stance within bounds
+    """
+    if np.isnan(value) or np.isinf(value):
+        return float(np.clip(default, bounds[0], bounds[1]))
+    return float(np.clip(value, bounds[0], bounds[1]))
+
 
 @dataclass
 class HomophilyConfig:
@@ -84,6 +109,10 @@ class HomophilyEngine:
         Returns:
             Affinity in [0, 1]
         """
+        # SAFETY FIX: Sanitize inputs
+        stance_a = _sanitize_stance(stance_a)
+        stance_b = _sanitize_stance(stance_b)
+
         stance_diff = abs(stance_a - stance_b)
         return 1.0 - (stance_diff / 2.0)
 
@@ -110,6 +139,11 @@ class HomophilyEngine:
         Returns:
             Trust delta (can be negative)
         """
+        # SAFETY FIX: Sanitize inputs
+        affinity = _sanitize_stance(affinity, default=0.5, bounds=(0.0, 1.0))
+        interaction_quality = _sanitize_stance(interaction_quality, default=0.5, bounds=(0.0, 1.0))
+        trust_in_sender = _sanitize_stance(trust_in_sender, default=0.0, bounds=(-1.0, 1.0))
+
         # Normalize trust to [0, 1] for calculation
         normalized_trust = (trust_in_sender + 1) / 2
 
@@ -507,19 +541,35 @@ class EchoChamberAnalyzer:
         if not agent_stances:
             return 0.0
 
-        stances = list(agent_stances.values())
+        # SAFETY FIX: Sanitize stance values
+        stances = [
+            _sanitize_stance(s) for s in agent_stances.values()
+            if not (np.isnan(s) or np.isinf(s))
+        ]
+
+        if not stances:
+            return 0.0
 
         # Use entropy-based diversity
         # Bin stances into categories
         bins = np.linspace(-1, 1, 5)  # -1 to 1 in 5 bins
         hist, _ = np.histogram(stances, bins=bins)
 
+        # SAFETY FIX: Safe division with epsilon
+        hist_sum = hist.sum()
+        if hist_sum < _EPSILON:
+            return 0.0
+
         # Compute normalized entropy
-        probs = hist / hist.sum()
-        entropy = -sum(p * np.log(p + 1e-10) for p in probs)
+        probs = hist / hist_sum
+        entropy = -sum(p * np.log(p + _EPSILON) for p in probs if p > 0)
         max_entropy = np.log(len(bins) - 1)
 
-        return float(entropy / max_entropy) if max_entropy > 0 else 0.0
+        # SAFETY FIX: Protect against zero max_entropy
+        if max_entropy < _EPSILON:
+            return 0.0
+
+        return float(np.clip(entropy / max_entropy, 0.0, 1.0))
 
 
 # =============================================================================

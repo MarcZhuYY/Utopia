@@ -29,6 +29,40 @@ if TYPE_CHECKING:
     from utopia.layer3_cognition.agent import Agent
 
 
+def _sanitize_float(
+    value: float,
+    default: float = 0.0,
+    bounds: tuple[float, float] = (-float("inf"), float("inf")),
+    name: str = "value",
+) -> float:
+    """Sanitize float value: replace NaN/Inf with default, then clip.
+
+    SAFETY FIX: Prevents NaN/Inf from contaminating belief system.
+
+    Args:
+        value: Input value to sanitize
+        default: Default value if NaN or Inf (when bounds are finite)
+        bounds: Valid range (min, max)
+        name: Parameter name for logging
+
+    Returns:
+        Sanitized float value
+    """
+    # Check for NaN
+    if np.isnan(value):
+        return float(np.clip(default, bounds[0], bounds[1]))
+
+    # Check for Inf (if bounds are finite)
+    if np.isinf(value):
+        if bounds[0] > -float("inf") and bounds[1] < float("inf"):
+            return float(np.clip(default, bounds[0], bounds[1]))
+        # If bounds are infinite, clip to something reasonable
+        return float(np.clip(0.0 if np.isnan(default) else default, -1e6, 1e6))
+
+    # Clip to bounds
+    return float(np.clip(value, bounds[0], bounds[1]))
+
+
 @dataclass
 class BayesianBeliefDelta:
     """Change in belief state from Bayesian update.
@@ -143,6 +177,8 @@ class BayesianBeliefSystem:
     ) -> StanceState:
         """Initialize a new stance.
 
+        SAFETY FIX: Sanitizes inputs to prevent NaN/Inf initialization.
+
         Args:
             topic_id: Topic identifier
             position: Initial position in [-1, 1]
@@ -151,10 +187,18 @@ class BayesianBeliefSystem:
         Returns:
             Created stance state
         """
+        # SAFETY FIX: Sanitize initialization parameters
+        position = _sanitize_float(
+            position, default=0.0, bounds=(-1.0, 1.0), name="position"
+        )
+        confidence = _sanitize_float(
+            confidence, default=0.5, bounds=(0.0, 1.0), name="confidence"
+        )
+
         stance = StanceState(
             topic_id=topic_id,
-            position=float(np.clip(position, -1.0, 1.0)),
-            confidence=float(np.clip(confidence, 0.0, 1.0)),
+            position=position,
+            confidence=confidence,
             evidence_count=0,
             counter_count=0,
             last_updated_tick=0,
@@ -186,17 +230,35 @@ class BayesianBeliefSystem:
         Returns:
             BeliefDelta with old and new values
         """
+        # SAFETY FIX: Sanitize all inputs to prevent NaN/Inf contamination
+        message_stance = _sanitize_float(
+            message_stance, default=0.0, bounds=(-1.0, 1.0), name="message_stance"
+        )
+        intensity = _sanitize_float(
+            intensity, default=0.5, bounds=(0.0, 1.0), name="intensity"
+        )
+        trust_in_sender = _sanitize_float(
+            trust_in_sender, default=0.5, bounds=(0.0, 1.0), name="trust_in_sender"
+        )
+        current_tick = max(0, int(_sanitize_float(current_tick, default=0, name="current_tick")))
+
         # Get or create current stance
         current = self.stances.get(topic_id)
         if current is None:
             current = self.initialize_stance(topic_id, 0.0, 0.5)
 
         # Store old values
-        old_position = current.position
-        old_confidence = current.confidence
+        old_position = _sanitize_float(
+            current.position, default=0.0, bounds=(-1.0, 1.0), name="old_position"
+        )
+        old_confidence = _sanitize_float(
+            current.confidence, default=0.5, bounds=(0.0, 1.0), name="old_confidence"
+        )
 
-        # Get openness from personality traits
-        openness = self.traits.openness
+        # Get openness from personality traits (sanitize trait value)
+        openness = _sanitize_float(
+            self.traits.openness, default=0.5, bounds=(0.0, 1.0), name="openness"
+        )
 
         # Compute Delta = (S_m - S_i) * T_ij * I_m
         delta = (message_stance - old_position) * trust_in_sender * intensity

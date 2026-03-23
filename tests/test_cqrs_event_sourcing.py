@@ -92,7 +92,7 @@ class TestWorldEventBuffer:
 
         await buffer.append(event)
 
-        events = buffer.drain(1)
+        events = await buffer.drain(1)
         assert len(events) == 1
         assert events[0].event_id == "evt-001"
 
@@ -115,11 +115,11 @@ class TestWorldEventBuffer:
         await buffer.append(event)
 
         # First drain
-        events1 = buffer.drain(1)
+        events1 = await buffer.drain(1)
         assert len(events1) == 1
 
         # Second drain should be empty
-        events2 = buffer.drain(1)
+        events2 = await buffer.drain(1)
         assert len(events2) == 0
 
     @pytest.mark.asyncio
@@ -143,7 +143,7 @@ class TestWorldEventBuffer:
 
         await buffer.append_many(events)
 
-        drained = buffer.drain(1)
+        drained = await buffer.drain(1)
         assert len(drained) == 10
 
     @pytest.mark.asyncio
@@ -178,12 +178,12 @@ class TestWorldEventBuffer:
         await buffer.append(event2)
 
         # Drain tick 1
-        tick1_events = buffer.drain(1)
+        tick1_events = await buffer.drain(1)
         assert len(tick1_events) == 1
         assert tick1_events[0].event_id == "evt-tick1"
 
         # Drain tick 2
-        tick2_events = buffer.drain(2)
+        tick2_events = await buffer.drain(2)
         assert len(tick2_events) == 1
         assert tick2_events[0].event_id == "evt-tick2"
 
@@ -204,7 +204,7 @@ class TestWorldEventBuffer:
         )
         await buffer.append(event)
 
-        stats = buffer.get_stats()
+        stats = await buffer.get_stats()
         assert stats["current_tick"] == 0
         assert stats["total_buffered_events"] == 1
 
@@ -240,7 +240,7 @@ class TestWorldEventBuffer:
         await asyncio.gather(*tasks)
 
         # Verify all events collected
-        events = buffer.drain(1)
+        events = await buffer.drain(1)
         assert len(events) == agent_count * event_count
 
         # Verify grouping by agent
@@ -289,7 +289,7 @@ class TestEventGrouping:
             await buffer.append(event)
 
         # Group by type
-        grouped = buffer.get_events_by_type(1)
+        grouped = await buffer.get_events_by_type(1)
 
         assert len(grouped[EventType.STANCE_CHANGE]) == 3
         assert len(grouped[EventType.AGENT_ACTION]) == 2
@@ -329,7 +329,7 @@ class TestFiftyAgentsFiftyEvents:
         await asyncio.gather(*tasks)
 
         # Verify all events collected
-        events = buffer.drain(1)
+        events = await buffer.drain(1)
         assert len(events) == agent_count * events_per_agent
 
         # Verify each agent's events are correct

@@ -22,6 +22,27 @@ from utopia.layer3_cognition.persona_anchor import (
 )
 from utopia.layer3_cognition.decision_engine import AgentDecisionEngine, Decision, AttentionItem
 
+# Phase 8: 3-tier memory system
+from utopia.layer3_cognition.warm_memory_models import (
+    ColdMemory,
+    HotMemoryItem,
+    WarmMemoryItem,
+    PendingEmbeddingItem,
+    RetrievedMemory,
+)
+from utopia.layer3_cognition.memory_3tier import MemorySystem3Tier
+
+# Phase 10: Agent Persona templates with Pydantic v2
+from utopia.layer3_cognition.agent_persona_models import (
+    AgentRole,
+    BaseAgentPersona,
+    RetailInvestorPersona,
+    QuantInstitutionPersona,
+    InsiderPersona,
+    MacroRegulatorPersona,
+)
+from utopia.layer3_cognition.agent_factory import AgentFactory
+
 __all__ = [
     "Agent",
     "MemorySystem",
@@ -39,4 +60,19 @@ __all__ = [
     "AgentDecisionEngine",
     "Decision",
     "AttentionItem",
+    # Phase 8: 3-tier memory
+    "MemorySystem3Tier",
+    "ColdMemory",
+    "HotMemoryItem",
+    "WarmMemoryItem",
+    "PendingEmbeddingItem",
+    "RetrievedMemory",
+    # Phase 10: Agent Persona templates
+    "AgentRole",
+    "BaseAgentPersona",
+    "RetailInvestorPersona",
+    "QuantInstitutionPersona",
+    "InsiderPersona",
+    "MacroRegulatorPersona",
+    "AgentFactory",
 ]
