@@ -40,6 +40,18 @@ from utopia.layer5_engine.mailbox import (
     ActiveTaskPool,
     TickProcessor,
 )
+from utopia.layer5_engine.batch_embedding_processor import (
+    BatchEmbeddingProcessor,
+    MockBatchEmbeddingProcessor,
+    PendingEmbeddingItem,
+)
+
+# Phase 9: CQRS + Event Sourcing
+from utopia.layer5_engine.engine_cqrs import (
+    SimulationEngineCQRS,
+    SimulationConfig,
+    TickResult,
+)
 
 __all__ = [
     "SimulationEngine",
@@ -68,4 +80,12 @@ __all__ = [
     "MessagePriority",
     "ActiveTaskPool",
     "TickProcessor",
+    # Phase 8: Batch Embedding
+    "BatchEmbeddingProcessor",
+    "MockBatchEmbeddingProcessor",
+    "PendingEmbeddingItem",
+    # Phase 9: CQRS + Event Sourcing
+    "SimulationEngineCQRS",
+    "SimulationConfig",
+    "TickResult",
 ]
