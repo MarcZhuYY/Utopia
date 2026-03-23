@@ -21,9 +21,32 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import BaseModel, Field
 
+from utopia.layer3_cognition.agent_persona_models import AgentRole
+
 if TYPE_CHECKING:
     from utopia.layer5_engine.world_state_buffer import WorldState, AgentState
     from utopia.layer3_cognition.agent_persona_models import BaseAgentPersona
+
+
+# Alpha Factor Constants
+PFF_VARIANCE_PENALTY = 10.0  # PFF denominator weight for stance variance
+IDF_WINDOW_DIVISOR = 2  # IDF calculation window divisor
+IDF_MIN_TICKS = 1  # Minimum IDF half-life in ticks
+IDF_MAX_TICKS = 100  # Maximum IDF half-life in ticks
+
+
+def _safe_mean(arr: np.ndarray, mask: np.ndarray) -> float:
+    """Compute mean with safe handling of empty groups."""
+    if not np.any(mask):
+        return 0.0
+    return float(np.mean(arr[mask]))
+
+
+def _safe_var(arr: np.ndarray, mask: np.ndarray) -> float:
+    """Compute variance with safe handling."""
+    if np.sum(mask) < 2:
+        return 0.0
+    return float(np.var(arr[mask], ddof=1))
 
 
 class TickMetrics(BaseModel):
@@ -189,11 +212,11 @@ class SimulationMetricsCollector:
                 stances[i] = first_stance.position
                 confidences[i] = first_stance.confidence
 
-        # Create masks for vectorized filtering
-        is_retail = roles == "retail"
-        is_quant = roles == "quant"
-        is_insider = roles == "insider"
-        is_regulator = roles == "regulator"
+        # Create masks for vectorized filtering (using enum values)
+        is_retail = roles == AgentRole.RETAIL.value
+        is_quant = roles == AgentRole.QUANT.value
+        is_insider = roles == AgentRole.INSIDER.value
+        is_regulator = roles == AgentRole.REGULATOR.value
         is_smart = is_quant | is_insider | is_regulator
 
         return {
@@ -225,19 +248,6 @@ class SimulationMetricsCollector:
         is_insider = data["is_insider"]
         is_regulator = data["is_regulator"]
 
-        # Safe mean calculation (handle empty groups)
-        def safe_mean(arr: np.ndarray, mask: np.ndarray) -> float:
-            """Compute mean with safe handling of empty groups."""
-            if not np.any(mask):
-                return 0.0
-            return float(np.mean(arr[mask]))
-
-        def safe_var(arr: np.ndarray, mask: np.ndarray) -> float:
-            """Compute variance with safe handling."""
-            if np.sum(mask) < 2:
-                return 0.0
-            return float(np.var(arr[mask], ddof=1))
-
         # Population statistics
         n_retail = int(np.sum(is_retail))
         n_quant = int(np.sum(is_quant))
@@ -246,11 +256,11 @@ class SimulationMetricsCollector:
         n_total = len(stances)
 
         # Stance means by group (vectorized masking)
-        mean_stance_retail = safe_mean(stances, is_retail)
-        mean_stance_quant = safe_mean(stances, is_quant)
-        mean_stance_insider = safe_mean(stances, is_insider)
-        mean_stance_regulator = safe_mean(stances, is_regulator)
-        mean_stance_smart = safe_mean(stances, is_smart)
+        mean_stance_retail = _safe_mean(stances, is_retail)
+        mean_stance_quant = _safe_mean(stances, is_quant)
+        mean_stance_insider = _safe_mean(stances, is_insider)
+        mean_stance_regulator = _safe_mean(stances, is_regulator)
+        mean_stance_smart = _safe_mean(stances, is_smart)
 
         # Capital-weighted overall mean
         total_capital = np.sum(capital_weights)
@@ -262,19 +272,19 @@ class SimulationMetricsCollector:
             mean_stance_overall = float(np.mean(stances))
 
         # Confidence means
-        mean_confidence_retail = safe_mean(confidences, is_retail)
-        mean_confidence_smart = safe_mean(confidences, is_smart)
+        mean_confidence_retail = _safe_mean(confidences, is_retail)
+        mean_confidence_smart = _safe_mean(confidences, is_smart)
 
         # Variance
-        var_stance_retail = safe_var(stances, is_retail)
-        var_stance_overall = safe_var(stances, np.ones(len(stances), dtype=bool))
+        var_stance_retail = _safe_var(stances, is_retail)
+        var_stance_overall = _safe_var(stances, np.ones(len(stances), dtype=bool))
 
         # ===== Alpha Factor Calculation =====
 
         # PFF: Polarization Fragility Factor
-        # PFF = (|mean_S_R| * mean_C_R) / (1.0 + 10.0 * var_S_R)
+        # PFF = (|mean_S_R| * mean_C_R) / (1.0 + PFF_VARIANCE_PENALTY * var_S_R)
         pff_numerator = abs(mean_stance_retail) * mean_confidence_retail
-        pff_denominator = 1.0 + 10.0 * var_stance_retail
+        pff_denominator = 1.0 + PFF_VARIANCE_PENALTY * var_stance_retail
         pff = pff_numerator / (pff_denominator + self.epsilon)
 
         # SMD: Smart Money Divergence
@@ -399,21 +409,22 @@ class SimulationMetricsCollector:
 
         # Estimate half-life from decay rate
         # Heuristic: use log ratio of current to past EWM
-        past_ewm = ewm_mean.shift(self.idf_window // 2)
+        shift_periods = self.idf_window // IDF_WINDOW_DIVISOR
+        past_ewm = ewm_mean.shift(shift_periods)
 
         # Safe division: replace zeros with NaN, ffill
         ratio = ewm_mean / (past_ewm.replace(0, np.nan).fillna(self.epsilon))
 
         # Compute half-life: log(2) / decay_rate
         # decay_rate approximated from ratio
-        decay_rate = -np.log(ratio + self.epsilon) / (self.idf_window // 2)
+        decay_rate = -np.log(ratio + self.epsilon) / shift_periods
         decay_rate = decay_rate.replace([np.inf, -np.inf], np.nan).fillna(0.1)
 
         # IDF = ln(2) / lambda
         idf = np.log(2) / (decay_rate + self.epsilon)
 
-        # Clip to reasonable range [1, 100] ticks
-        return idf.clip(1.0, 100.0)
+        # Clip to reasonable range [IDF_MIN_TICKS, IDF_MAX_TICKS]
+        return idf.clip(IDF_MIN_TICKS, IDF_MAX_TICKS)
 
     def get_summary_stats(self) -> dict[str, Any]:
         """Get summary statistics of collected metrics."""
