@@ -1,6 +1,6 @@
 [project]
 name = "utopia-sim"
-version = "0.1.0"
+version = "0.2.0"
 description = "High-fidelity multi-agent simulation engine for market prediction and social dynamics"
 readme = "README.md"
 license = {text = "MIT"}
@@ -45,8 +45,8 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/anthropics-agents/utopia"
-Documentation = "https://github.com/anthropics-agents/utopia#readme"
+Homepage = "https://github.com/MarcZhuYY/Utopia"
+Documentation = "https://github.com/MarcZhuYY/Utopia#readme"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,6 +1,7 @@
-"""Simple simulation example.
+"""Simple simulation example - Utopia v0.2.0.
 
-This example demonstrates running a minimal simulation without LLM integration.
+This example demonstrates running a minimal simulation with Agent Persona system.
+Shows how different agent roles (retail, quant, regulator) interact.
 """
 
 from utopia.core.config import SimulationConfig
