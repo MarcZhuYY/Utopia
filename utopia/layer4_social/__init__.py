@@ -23,6 +23,7 @@ from utopia.layer4_social.homophily import (
     compute_trust_delta_matrix,
 )
 from utopia.layer4_social.dynamics import GroupDynamicsDetector, PolarizationReport
+from utopia.layer4_social.social_network_tensor import SocialTensorGraph
 
 __all__ = [
     "RelationshipMap",
@@ -41,4 +42,5 @@ __all__ = [
     "compute_trust_delta_matrix",
     "GroupDynamicsDetector",
     "PolarizationReport",
+    "SocialTensorGraph",
 ]
