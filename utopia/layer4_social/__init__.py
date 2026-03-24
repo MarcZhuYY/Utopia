@@ -8,13 +8,6 @@ This layer handles agent relationships and social dynamics:
 """
 
 from utopia.layer4_social.relationships import RelationshipMap, RelationshipEdge, RelationshipDelta
-from utopia.layer4_social.propagator import InformationPropagator, Message
-from utopia.layer4_social.propagator_vectorized import (
-    VectorizedPropagator,
-    FastBFSPropagator,
-    PropagationResult,
-    create_propagator,
-)
 from utopia.layer4_social.homophily import (
     HomophilyEngine,
     HomophilyConfig,
@@ -29,12 +22,6 @@ __all__ = [
     "RelationshipMap",
     "RelationshipEdge",
     "RelationshipDelta",
-    "InformationPropagator",
-    "Message",
-    "VectorizedPropagator",
-    "FastBFSPropagator",
-    "PropagationResult",
-    "create_propagator",
     "HomophilyEngine",
     "HomophilyConfig",
     "EchoChamberAnalyzer",

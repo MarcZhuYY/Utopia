@@ -1,79 +1,399 @@
-"""Main simulation engine.
+"""CQRS simulation engine with event sourcing.
 
-Orchestrates the tick-by-tick simulation loop.
+Rewritten tick lifecycle using CQRS pattern:
+1. Query Phase: Issue read-only context
+2. Command Phase: Agents decide in parallel, generate events
+3. Commit Phase: Batch flush to Neo4j via UNWIND
 """
 
 from __future__ import annotations
 
-import json
-import time
+import asyncio
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-import networkx as nx
-import structlog
-
-from utopia.core.config import SimulationConfig, WorldRules
-from utopia.core.models import (
-    ExternalEvent,
-    SeedMaterial,
+from utopia.layer2_world.neo4j_graph_mutator import Neo4jGraphMutator
+from utopia.layer2_world.query_service import KnowledgeGraphQueryService, ReadOnlyContext
+from utopia.layer2_world.world_event_buffer import WorldEventBuffer
+from utopia.layer2_world.world_events import (
+    AgentActionEvent,
+    OpinionCreateEvent,
+    RelationshipUpdateEvent,
+    StanceChangeEvent,
+    WorldEvent,
 )
-from utopia.layer1_seed.parser import MaterialParser
-from utopia.layer2_world.knowledge_graph import KnowledgeGraph, KnowledgeGraphBuilder
-from utopia.layer2_world.rule_engine import RuleEngine
-from utopia.layer3_cognition.agent import Agent as CognitionAgent
-from utopia.layer3_cognition.decision_engine import AgentDecisionEngine, SimulationContext
-from utopia.layer4_social.relationships import RelationshipMap
-from utopia.layer4_social.propagator import InformationPropagator, create_message
-from utopia.layer4_social.dynamics import GroupDynamicsDetector
-from utopia.layer5_engine.convergence import ConvergenceDetector
-from utopia.layer5_engine.event_injector import ExternalEventInjector
 
-logger = structlog.get_logger()
+if TYPE_CHECKING:
+    from utopia.layer3_cognition.agent import Agent as CognitionAgent
+
+
+@dataclass
+class SimulationConfig:
+    """Configuration for CQRS simulation engine."""
+
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "password"
+    max_concurrent_agents: int = 100
+    event_buffer_size: int = 10000
+    enable_event_sourcing: bool = True
+
+
+@dataclass
+class TickResult:
+    """Result of a single tick execution."""
+
+    tick_number: int
+    events_generated: int
+    events_committed: int
+    commit_duration_ms: float
+    agent_decisions: dict[str, Any] = field(default_factory=dict)
+
+
+class SimulationEngineCQRS:
+    """
+    CQRS architecture simulation engine.
+
+    Three-phase tick lifecycle:
+        1. Query Phase: Issue read-only context to all agents
+        2. Command Phase: Agents decide in parallel, events buffered
+        3. Commit Phase: Batch write to Neo4j via UNWIND
+
+    Benefits:
+        - Lock-free agent parallel execution
+        - Single transaction per tick (no write contention)
+        - Complete audit trail via event sourcing
+        - Scales to 100+ agents
+
+    Example:
+        >>> config = SimulationConfig()
+        >>> engine = SimulationEngineCQRS(config)
+        >>> await engine.initialize(agents)
+        >>> result = await engine.run_tick(tick_number=1)
+        >>> print(f"Processed {result.events_committed} events")
+    """
+
+    def __init__(self, config: SimulationConfig):
+        """
+        Initialize CQRS simulation engine.
+
+        Args:
+            config: Simulation configuration
+        """
+        self.config = config
+
+        # CQRS components
+        self.event_buffer = WorldEventBuffer(max_size=config.event_buffer_size)
+        self.graph_mutator = Neo4jGraphMutator(
+            neo4j_uri=config.neo4j_uri,
+            neo4j_user=config.neo4j_user,
+            neo4j_password=config.neo4j_password,
+        )
+
+        # Query service (read-only)
+        self.query_service: Optional[KnowledgeGraphQueryService] = None
+
+        # Agent registry
+        self.agents: dict[str, "CognitionAgent"] = {}
+
+        # Statistics
+        self._tick_count = 0
+        self._total_events = 0
+
+    async def initialize(
+        self,
+        agents: dict[str, "CognitionAgent"],
+        knowledge_graph: Optional[Any] = None,
+    ) -> None:
+        """
+        Initialize engine with agents.
+
+        Args:
+            agents: Mapping of agent_id to Agent instances
+            knowledge_graph: Optional knowledge graph for queries
+        """
+        self.agents = agents
+        self.query_service = KnowledgeGraphQueryService(knowledge_graph)
+
+    async def run_tick(self, tick_number: int) -> TickResult:
+        """
+        Execute a single tick with CQRS three-phase lifecycle.
+
+        Phase 1: QUERY - Engine issues read-only context
+        Phase 2: COMMAND - Agents decide in parallel, generate events
+        Phase 3: COMMIT - Batch flush events to Neo4j
+
+        Args:
+            tick_number: Current tick number
+
+        Returns:
+            TickResult with execution statistics
+        """
+        # ========== Phase 1: QUERY (Read-only context) ==========
+        read_context = await self._prepare_read_context(tick_number)
+
+        # ========== Phase 2: COMMAND (Parallel decisions) ==========
+        agent_events_list = await self._execute_agent_commands(read_context)
+
+        # Collect events to buffer
+        total_events = 0
+        for events in agent_events_list:
+            if events:
+                await self.event_buffer.append_many(events)
+                total_events += len(events)
+
+        # ========== Phase 3: COMMIT (Batch write) ==========
+        events_to_flush = await self.event_buffer.drain(tick_number)
+
+        commit_duration = 0.0
+        committed_count = 0
+
+        if events_to_flush:
+            result = await self.graph_mutator.flush_events(events_to_flush)
+            commit_duration = result["duration_ms"]
+            committed_count = result["processed"]
+
+        # Advance to next tick
+        self.event_buffer.advance_tick()
+        self._tick_count += 1
+        self._total_events += committed_count
+
+        return TickResult(
+            tick_number=tick_number,
+            events_generated=total_events,
+            events_committed=committed_count,
+            commit_duration_ms=commit_duration,
+        )
+
+    async def _prepare_read_context(self, tick_number: int) -> ReadOnlyContext:
+        """
+        Prepare read-only context for agent queries.
+
+        Agents can ONLY read world state through this interface,
+        never directly access Neo4j!
+
+        Args:
+            tick_number: Current tick number
+
+        Returns:
+            ReadOnlyContext snapshot
+        """
+        if self.query_service is None:
+            # Return empty context if not initialized
+            return ReadOnlyContext(
+                tick_number=tick_number,
+                agent_stances={},
+                recent_events=[],
+                trust_matrix={},
+                active_topics=[],
+            )
+
+        return await self.query_service.prepare_context(tick_number)
+
+    async def _execute_agent_commands(
+        self, context: ReadOnlyContext
+    ) -> list[list[WorldEvent]]:
+        """
+        Execute all agent commands in parallel.
+
+        Agents run completely in parallel with no lock contention.
+
+        Args:
+            context: Read-only context for decision making
+
+        Returns:
+            List of event lists from each agent
+        """
+        semaphore = asyncio.Semaphore(self.config.max_concurrent_agents)
+
+        async def run_agent_with_limit(agent_id: str, agent: "CognitionAgent"):
+            """Run agent with concurrency limit."""
+            async with semaphore:
+                return await self._agent_tick_command(agent_id, agent, context)
+
+        # Create tasks for all agents
+        tasks = [
+            asyncio.create_task(run_agent_with_limit(agent_id, agent))
+            for agent_id, agent in self.agents.items()
+        ]
+
+        # Execute all agents (asyncio parallelizes automatically)
+        return await asyncio.gather(*tasks)
+
+    async def _agent_tick_command(
+        self,
+        agent_id: str,
+        agent: "CognitionAgent",
+        context: ReadOnlyContext,
+    ) -> list[WorldEvent]:
+        """
+        Single agent's Command Phase.
+
+        Agent makes decisions and generates events,
+        without directly modifying the graph.
+
+        Args:
+            agent_id: Agent identifier
+            agent: Agent instance
+            context: Read-only context
+
+        Returns:
+            List of domain events generated
+        """
+        events: list[WorldEvent] = []
+
+        # Get agent decision from its decision engine
+        # This is a placeholder - actual implementation depends on Agent class
+        decision = await self._get_agent_decision(agent, context)
+
+        if decision is None:
+            return events
+
+        # Convert decision to domain events
+        if decision.get("action_type") == "change_stance":
+            event = StanceChangeEvent(
+                event_id=str(uuid.uuid4()),
+                tick_number=context.tick_number,
+                source_agent_id=agent_id,
+                agent_id=agent_id,
+                topic_id=decision.get("topic_id", ""),
+                old_position=decision.get("old_position", 0.0),
+                new_position=decision.get("new_position", 0.0),
+                confidence=decision.get("confidence", 0.5),
+            )
+            events.append(event)
+
+        elif decision.get("action_type") == "speak":
+            # Create opinion event
+            opinion_event = OpinionCreateEvent(
+                event_id=str(uuid.uuid4()),
+                tick_number=context.tick_number,
+                source_agent_id=agent_id,
+                opinion_id=f"op_{agent_id}_{context.tick_number}_{uuid.uuid4().hex[:8]}",
+                agent_id=agent_id,
+                topic_id=decision.get("topic_id", ""),
+                content=decision.get("content", ""),
+                stance_position=decision.get("stance_position", 0.0),
+                confidence=decision.get("confidence", 0.5),
+            )
+            events.append(opinion_event)
+
+            # Update influence relationships
+            for listener_id in decision.get("target_listeners", []):
+                current_influence = await context.get_influence(agent_id, listener_id)
+                rel_event = RelationshipUpdateEvent(
+                    event_id=str(uuid.uuid4()),
+                    tick_number=context.tick_number,
+                    source_agent_id=agent_id,
+                    from_node_id=agent_id,
+                    to_node_id=listener_id,
+                    relationship_type="INFLUENCES",
+                    old_weight=current_influence,
+                    new_weight=min(1.0, current_influence + 0.1),
+                    delta=0.1,
+                )
+                events.append(rel_event)
+
+        elif decision.get("action_type") == "act":
+            action_event = AgentActionEvent(
+                event_id=str(uuid.uuid4()),
+                tick_number=context.tick_number,
+                source_agent_id=agent_id,
+                action_type=decision.get("action_subtype", "generic"),
+                target_agent_id=decision.get("target_agent_id"),
+                content=decision.get("content", ""),
+                topic_id=decision.get("topic_id"),
+                importance=decision.get("importance", 0.5),
+            )
+            events.append(action_event)
+
+        return events
+
+    async def _get_agent_decision(
+        self,
+        agent: "CognitionAgent",
+        context: ReadOnlyContext,
+    ) -> Optional[dict[str, Any]]:
+        """
+        Get decision from agent.
+
+        This is a bridge method that calls the agent's decision engine.
+        Actual implementation depends on Agent class structure.
+
+        Args:
+            agent: Agent instance
+            context: Read-only context
+
+        Returns:
+            Decision dict or None
+        """
+        # Check if agent has a decide method
+        if hasattr(agent, "decide"):
+            try:
+                # Try async decide
+                if asyncio.iscoroutinefunction(agent.decide):
+                    return await agent.decide(context)
+                else:
+                    # Fall back to sync decide
+                    return agent.decide(context)
+            except Exception as e:
+                # Log error but don't crash the tick
+                print(f"Agent {agent.agent_id if hasattr(agent, 'agent_id') else 'unknown'} "
+                      f"decision error: {e}")
+                return None
+
+        # If no decide method, return None
+        return None
+
+    async def close(self) -> None:
+        """Clean up resources."""
+        await self.graph_mutator.close()
+
+    def get_stats(self) -> dict[str, Any]:
+        """
+        Get engine statistics.
+
+        Returns:
+            Dict with tick_count, total_events, buffer_stats, mutator_stats
+        """
+        return {
+            "tick_count": self._tick_count,
+            "total_events": self._total_events,
+            "buffer_stats": self.event_buffer.get_stats(),
+            "mutator_stats": self.graph_mutator.get_stats(),
+        }
+
+
+# Backward compatibility aliases
+SimulationEngine = SimulationEngineCQRS
 
 
 @dataclass
 class WorldState:
-    """Complete world state for simulation.
+    """Backward compatibility WorldState.
 
-    Contains all mutable state that changes during simulation.
+    DEPRECATED: Use WorldStateBuffer instead.
     """
 
-    agents: dict[str, CognitionAgent] = field(default_factory=dict)
-    relationship_graph: nx.DiGraph = field(default_factory=nx.DiGraph)
-    knowledge_graph: KnowledgeGraph = field(default_factory=KnowledgeGraph)
-    relationship_map: RelationshipMap = field(default_factory=RelationshipMap)
-    external_events: list[ExternalEvent] = field(default_factory=list)
     tick: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "tick": self.tick,
-            "agent_count": len(self.agents),
-            "events": [e.to_dict() for e in self.external_events],
-        }
+        return {"tick": self.tick}
 
 
 @dataclass
 class SimulationResult:
-    """Result of a simulation run.
+    """Backward compatibility SimulationResult.
 
-    Contains all outputs and metrics.
+    DEPRECATED: Use TickResult instead.
     """
 
     final_tick: int = 0
     agent_count: int = 0
     domain: str = "general"
     duration_seconds: float = 0.0
-    total_llm_calls: int = 0
-    estimated_cost: float = 0.0
     converged: bool = False
-    convergence_reason: str = ""
-    dynamics_history: list[dict[str, Any]] = field(default_factory=list)
-    agent_traces: dict[str, list[dict]] = field(default_factory=dict)
-    stance_history: dict[str, list[dict]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,408 +401,5 @@ class SimulationResult:
             "agent_count": self.agent_count,
             "domain": self.domain,
             "duration_seconds": self.duration_seconds,
-            "total_llm_calls": self.total_llm_calls,
-            "estimated_cost": self.estimated_cost,
             "converged": self.converged,
-            "convergence_reason": self.convergence_reason,
-            "dynamics_history": self.dynamics_history,
-            "stance_history": self.stance_history,
         }
-
-
-class SimulationEngine:
-    """Main simulation engine.
-
-    Executes the tick-by-tick simulation loop:
-    1. External event injection
-    2. Perception phase
-    3. Decision phase
-    4. Action phase
-    5. Interaction phase
-    6. World update
-    7. Convergence check
-    """
-
-    def __init__(self, config: SimulationConfig):
-        """Initialize simulation engine.
-
-        Args:
-            config: Simulation configuration
-        """
-        self.config = config
-        self.tick_count = 0
-        self.world_state: WorldState | None = None
-        self.logger = logger
-        self.event_injector: ExternalEventInjector | None = None
-        self.convergence_detector = ConvergenceDetector(config.world_rules)
-        self.group_dynamics = GroupDynamicsDetector()
-        self.rule_engine = RuleEngine(config.world_rules, config.domain)
-
-        # State
-        self._agent_traces: dict[str, list[dict]] = {}
-        self._stance_history: dict[str, list[dict]] = {}
-        self._dynamics_history: list[dict[str, Any]] = []
-        self._llm_call_count = 0
-        self._start_time: float = 0
-
-    def initialize(self, seed: SeedMaterial) -> None:
-        """Initialize simulation from seed material.
-
-        Args:
-            seed: Seed material
-        """
-        self.logger.info("Initializing simulation", agent_count=self.config.agent_count)
-
-        # Build world state
-        self.world_state = WorldState()
-
-        # Build knowledge graph
-        kg_builder = KnowledgeGraphBuilder()
-        self.world_state.knowledge_graph = kg_builder.build_from_seed(seed)
-
-        # Generate agents from entities or create defaults
-        self._generate_agents(seed)
-
-        # Build relationship network
-        self._build_relationship_network()
-
-        # Initialize event injector
-        self.event_injector = ExternalEventInjector(self)
-
-        # Initialize traces
-        self._agent_traces = {aid: [] for aid in self.world_state.agents}
-        self._stance_history = {}
-
-        self.logger.info("Initialization complete", agents=len(self.world_state.agents))
-
-    def _generate_agents(self, seed: SeedMaterial) -> None:
-        """Generate agents from seed material.
-
-        Args:
-            seed: Seed material
-        """
-        # Use entities from seed to create agents
-        agent_id = 0
-
-        for entity in seed.entities:
-            if entity.type.value in ["person", "org"]:
-                agent = CognitionAgent.from_entity(
-                    entity_id=entity.id,
-                    name=entity.name,
-                    role=entity.attributes.get("role", "analyst"),
-                    expertise=[entity.attributes.get("sector", "general")],
-                    base_stances=entity.initial_stance,
-                    influence=entity.influence_score,
-                )
-                self.world_state.agents[entity.id] = agent
-                agent_id += 1
-
-        # If not enough agents from entities, create defaults
-        if len(self.world_state.agents) < self.config.agent_count:
-            remaining = self.config.agent_count - len(self.world_state.agents)
-            for i in range(remaining):
-                agent_id_str = f"GEN{agent_id + i}"
-                agent = CognitionAgent.from_entity(
-                    entity_id=agent_id_str,
-                    name=f"Agent_{agent_id_str}",
-                    role="analyst",
-                    expertise=["general"],
-                    base_stances={},
-                    influence=0.5,
-                )
-                self.world_state.agents[agent_id_str] = agent
-
-        # Set relationship map reference for all agents
-        for agent in self.world_state.agents.values():
-            agent.set_relationship_map(self.world_state.relationship_map)
-
-    def _build_relationship_network(self) -> None:
-        """Build agent relationship network."""
-        agent_ids = list(self.world_state.agents.keys())
-
-        # Build complete graph initially
-        self.world_state.relationship_map.build_complete_graph(
-            agent_ids, base_trust=0.1
-        )
-
-        # Create NetworkX graph for propagation
-        self.world_state.relationship_graph = nx.DiGraph()
-        for aid in agent_ids:
-            self.world_state.relationship_graph.add_node(aid)
-        for i, ida in enumerate(agent_ids):
-            for idb in agent_ids:
-                if ida != idb:
-                    edge = self.world_state.relationship_map.get(ida, idb)
-                    self.world_state.relationship_graph.add_edge(
-                        ida, idb, weight=edge.influence_weight
-                    )
-
-    def run(self) -> SimulationResult:
-        """Run simulation until convergence or max ticks.
-
-        Returns:
-            SimulationResult: Simulation result
-        """
-        if not self.world_state:
-            raise RuntimeError("Engine not initialized. Call initialize() first.")
-
-        self._start_time = time.time()
-        max_ticks = self.config.max_ticks
-
-        self.logger.info("Starting simulation", max_ticks=max_ticks)
-
-        while self.tick_count < max_ticks:
-            # Pre-tick hook
-            self._pre_tick()
-
-            # Execute tick
-            self._execute_tick()
-
-            # Detect dynamics
-            dynamics = self._detect_dynamics()
-
-            # Log tick
-            self._log_tick(dynamics)
-
-            # Check convergence
-            conv_result = self.convergence_detector.check(self._dynamics_history)
-            if conv_result.converged:
-                self.logger.info(
-                    "Simulation converged",
-                    reason=conv_result.reason,
-                    ticks=self.tick_count,
-                )
-                break
-
-            self.tick_count += 1
-
-        duration = time.time() - self._start_time
-
-        return SimulationResult(
-            final_tick=self.tick_count,
-            agent_count=len(self.world_state.agents),
-            domain=self.config.domain,
-            duration_seconds=duration,
-            total_llm_calls=self._llm_call_count,
-            estimated_cost=self._estimate_cost(),
-            converged=conv_result.converged,
-            convergence_reason=conv_result.reason,
-            dynamics_history=self._dynamics_history,
-            agent_traces=self._agent_traces,
-            stance_history=self._stance_history,
-        )
-
-    def _pre_tick(self) -> None:
-        """Pre-tick processing."""
-        if self.event_injector:
-            self.event_injector.inject_pending()
-
-    def _execute_tick(self) -> None:
-        """Execute one simulation tick."""
-        # 1. Collect perceptions (messages received)
-        all_perceptions = self._collect_perceptions()
-
-        # 2. Decision phase - each agent decides independently
-        decisions = self._parallel_decide(all_perceptions)
-
-        # 3. Execute actions
-        actions = self._execute_actions(decisions)
-
-        # 4. Propagate information
-        propagations = self._propagate_information(actions)
-
-        # 5. Update world state
-        self._update_world_state(actions, propagations)
-
-    def _collect_perceptions(self) -> dict[str, list]:
-        """Collect perceptions for all agents.
-
-        Returns:
-            dict[str, list]: agent_id -> list of perceptions
-        """
-        # For MVP, no passive perceptions - agents only perceive what they act on
-        return {aid: [] for aid in self.world_state.agents}
-
-    def _parallel_decide(
-        self,
-        perceptions: dict[str, list],
-    ) -> dict[str, list]:
-        """Make decisions for all agents.
-
-        Args:
-            perceptions: Perceptions per agent
-
-        Returns:
-            dict[str, list]: agent_id -> actions
-        """
-        context = SimulationContext(
-            current_tick=self.tick_count,
-            world_state=self.world_state,
-            config=self.config,
-            current_situation_summary=self._get_situation_summary(),
-        )
-
-        engine = AgentDecisionEngine(self.config)
-        results = {}
-
-        for agent_id, agent in self.world_state.agents.items():
-            # Simple decision engine for MVP (no LLM)
-            from utopia.layer3_cognition.decision_engine import SimpleDecisionEngine
-            simple_engine = SimpleDecisionEngine()
-            actions = simple_engine.decide(agent, context, perceptions[agent_id])
-            results[agent_id] = actions
-
-        return results
-
-    def _execute_actions(self, decisions: dict[str, list]) -> list[dict]:
-        """Execute decided actions.
-
-        Args:
-            decisions: Decisions per agent
-
-        Returns:
-            list[dict]: Executed actions with metadata
-        """
-        executed = []
-
-        for agent_id, actions in decisions.items():
-            for action in actions:
-                executed.append({
-                    "agent_id": agent_id,
-                    "action": action,
-                })
-
-        return executed
-
-    def _propagate_information(self, actions: list[dict]) -> list:
-        """Propagate information from speak actions.
-
-        Args:
-            actions: Executed actions
-
-        Returns:
-            list: Propagation results
-        """
-        propagator = InformationPropagator(self.config.world_rules)
-        results = []
-
-        for item in actions:
-            if item["action"].action_type == "speak":
-                agent = self.world_state.agents[item["agent_id"]]
-                message = create_message(
-                    content=item["action"].content,
-                    sender_id=item["agent_id"],
-                    topic_id=item["action"].topic_id,
-                    original_stance=agent.get_stance(item["action"].topic_id).position
-                    if agent.get_stance(item["action"].topic_id)
-                    else 0.0,
-                )
-
-                received = propagator.propagate(
-                    message=message,
-                    sender=agent,
-                    graph=self.world_state.relationship_graph,
-                    relationships=self.world_state.relationship_map,
-                    agents=self.world_state.agents,
-                )
-                results.extend(received)
-
-        return results
-
-    def _update_world_state(
-        self,
-        actions: list[dict],
-        propagations: list,
-    ) -> None:
-        """Update world state after tick.
-
-        Args:
-            actions: Executed actions
-            propagations: Propagation results
-        """
-        # Decay agent energy
-        for agent in self.world_state.agents.values():
-            agent.decay_energy(0.02)
-
-        # Record traces
-        for item in actions:
-            self._agent_traces[item["agent_id"]].append({
-                "tick": self.tick_count,
-                "action": item["action"].to_dict(),
-            })
-
-    def _detect_dynamics(self) -> dict[str, Any]:
-        """Detect group dynamics.
-
-        Returns:
-            dict: Dynamics metrics
-        """
-        dynamics = {}
-
-        if self.config.enable_polarization_detection:
-            # Detect on first topic
-            if self.world_state.knowledge_graph.graph.nodes():
-                topic_id = list(self.world_state.knowledge_graph.graph.nodes())[0]
-                polarization = self.group_dynamics.detect_polarization(
-                    list(self.world_state.agents.values()), topic_id
-                )
-                dynamics["polarization"] = polarization.to_dict()
-
-        self._dynamics_history.append(dynamics)
-        return dynamics
-
-    def _log_tick(self, dynamics: dict[str, Any]) -> None:
-        """Log tick progress."""
-        if self.tick_count % 10 == 0:
-            self.logger.info(
-                "Tick progress",
-                tick=self.tick_count,
-                dynamics=dynamics,
-            )
-
-    def _get_situation_summary(self) -> str:
-        """Get current situation summary.
-
-        Returns:
-            str: Situation summary for context
-        """
-        if not self.world_state:
-            return ""
-
-        return f"Tick {self.tick_count}, {len(self.world_state.agents)} agents active"
-
-    def _estimate_cost(self) -> float:
-        """Estimate LLM cost.
-
-        Returns:
-            float: Estimated cost in USD
-        """
-        # Rough estimate: $0.001 per LLM call
-        return self._llm_call_count * 0.001
-
-    def save_results(self, output_dir: str) -> None:
-        """Save simulation results to files.
-
-        Args:
-            output_dir: Output directory
-        """
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        result = SimulationResult(
-            final_tick=self.tick_count,
-            agent_count=len(self.world_state.agents) if self.world_state else 0,
-            domain=self.config.domain,
-            duration_seconds=time.time() - self._start_time,
-            dynamics_history=self._dynamics_history,
-            agent_traces=self._agent_traces,
-            stance_history=self._stance_history,
-        )
-
-        with open(output_path / "result.json", "w") as f:
-            json.dump(result.to_dict(), f, indent=2, default=str)
-
-        if self.config.save_graph and self.world_state:
-            self.world_state.knowledge_graph.save_json(str(output_path / "knowledge_graph.json"))
-
-        self.logger.info("Results saved", output_dir=str(output_path))

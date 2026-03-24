@@ -32,7 +32,7 @@ from utopia.core.models import (
 )
 from utopia.core.pydantic_models import StanceState
 from utopia.layer3_cognition.agent_factory import AgentFactory
-from utopia.layer3_cognition.beliefs_v2 import BayesianBeliefSystem
+from utopia.layer3_cognition.beliefs import BayesianBeliefSystem
 from utopia.layer5_engine.world_state_buffer import AgentState, WorldState, WorldStateBuffer
 from utopia.layer6_analysis.metrics_collector import SimulationMetricsCollector
 

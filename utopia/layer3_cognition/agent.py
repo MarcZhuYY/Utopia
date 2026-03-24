@@ -19,7 +19,7 @@ from utopia.core.models import (
 )
 from utopia.core.pydantic_models import ActivityStatus
 from utopia.layer3_cognition.memory import MemorySystem
-from utopia.layer3_cognition.beliefs import BeliefSystem
+from utopia.layer3_cognition.beliefs import BayesianBeliefSystem
 
 if TYPE_CHECKING:
     from utopia.layer4_social.relationships import RelationshipMap
@@ -45,7 +45,7 @@ class Agent:
     id: str = field(default_factory=lambda: f"A{uuid.uuid4().hex[:8]}")
     persona: Persona = field(default_factory=Persona)
     memory: MemorySystem = field(default_factory=MemorySystem)
-    beliefs: BeliefSystem = field(default_factory=BeliefSystem)
+    beliefs: BayesianBeliefSystem = field(default_factory=BayesianBeliefSystem)
     state: AgentState = field(default_factory=AgentState)
     _relationship_map: Optional[Any] = field(default=None, repr=False)
     activity_status: ActivityStatus = field(default=ActivityStatus.ROUTINE)

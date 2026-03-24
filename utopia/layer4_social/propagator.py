@@ -1,274 +1,437 @@
-"""Information propagator with cognitive distortion.
+"""Vectorized message propagation engine using NumPy.
 
-Implements BFS propagation with depth decay and receiver bias.
+Replaces Python BFS loops with NumPy vectorized operations for
+massive performance improvement when propagating messages through
+social networks.
+
+Key optimization: Instead of iterating through neighbors one by one,
+compute propagation for all edges simultaneously using matrix operations.
 """
 
 from __future__ import annotations
 
-import uuid
-from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable, Optional
 
-import networkx as nx
+import numpy as np
 
-from utopia.core.config import WorldRules
-from utopia.core.models import Message
-from utopia.layer4_social.relationships import RelationshipMap
+from utopia.core.pydantic_models import PropagationBatch
 
 if TYPE_CHECKING:
-    from utopia.layer3_cognition.agent import Agent
+    from utopia.layer4_social.network import SocialNetwork
 
 
 @dataclass
-class ReceivedMessage:
-    """Message as received by an agent.
+class PropagationResult:
+    """Result of a propagation operation.
 
     Attributes:
-        message: Original message
-        from_agent: Sender ID
-        to_agent: Receiver ID
-        depth: Propagation depth from original sender
-        distortion_applied: Whether cognitive distortion was applied
-        trust_at_reception: Trust level when received
+        reached_agents: Set of agents who received the message
+        propagation_paths: List of (sender, receiver) tuples showing path
+        depth_reached: Maximum propagation depth achieved
+        successful_propagations: Count of successful message passes
     """
 
-    message: Message
-    from_agent: str = ""
-    to_agent: str = ""
-    depth: int = 0
-    distortion_applied: bool = False
-    trust_at_reception: float = 0.5
+    reached_agents: set[str]
+    propagation_paths: list[tuple[str, str, int]]  # (sender, receiver, depth)
+    depth_reached: int
+    successful_propagations: int
 
 
-class InformationPropagator:
-    """Propagates information through the agent network.
+class VectorizedPropagator:
+    """High-performance message propagation using NumPy vectorization.
 
-    Implements:
-    - BFS propagation with depth decay
-    - Trust-based reception probability
-    - Cognitive distortion at receiver
+    Algorithm overview:
+    1. Convert agent network to adjacency matrix
+    2. Represent message state as binary vector
+    3. Use matrix multiplication to compute propagation in parallel
+    4. Apply trust-based filtering using element-wise operations
+
+    Complexity: O(d * n²) where d = depth, n = agents
+    (vs O(d * e) for BFS where e = edges, but with much lower constant factors)
     """
 
-    def __init__(self, world_rules: Optional[WorldRules] = None):
-        """Initialize propagator.
+    def __init__(
+        self,
+        agent_ids: list[str],
+        trust_matrix: np.ndarray,
+        trust_threshold: float = 0.0,
+    ):
+        """Initialize vectorized propagator.
 
         Args:
-            world_rules: World rules for propagation parameters
+            agent_ids: Ordered list of agent IDs
+            trust_matrix: Trust adjacency matrix [n_agents, n_agents]
+            trust_threshold: Minimum trust for propagation
         """
-        self.rules = world_rules or WorldRules()
+        self.agent_ids = agent_ids
+        self.agent_index = {aid: i for i, aid in enumerate(agent_ids)}
+        self.n_agents = len(agent_ids)
+
+        # Create binary adjacency matrix (1 if trust > threshold, else 0)
+        self.adjacency = (trust_matrix >= trust_threshold).astype(np.float64)
+
+        # Store trust values for probability weighting
+        self.trust_matrix = np.clip(trust_matrix, -1, 1)
+
+        # Precompute normalized trust for propagation probability
+        # Higher trust = higher probability of accepting/sharing
+        trust_normalized = (self.trust_matrix + 1) / 2  # [-1,1] -> [0,1]
+        self.propagation_prob = trust_normalized
 
     def propagate(
         self,
-        message: Message,
-        sender: Agent,
-        graph: nx.DiGraph,
-        relationships: RelationshipMap,
-        agents: dict[str, Agent],
-    ) -> list[ReceivedMessage]:
-        """Propagate message through network.
+        source_agents: list[str],
+        max_depth: int = 3,
+        topic_stance: Optional[float] = None,
+        stance_tolerance: float = 0.5,
+    ) -> PropagationResult:
+        """Propagate message from source agents through network.
 
         Args:
-            message: Message to propagate
-            sender: Sending agent
-            graph: Network graph
-            relationships: Relationship map
-            agents: Dict of agent_id -> Agent
+            source_agents: Agents who initially have the message
+            max_depth: Maximum propagation depth
+            topic_stance: Optional stance value for the message
+            stance_tolerance: How different agent stances can be from message
 
         Returns:
-            list[ReceivedMessage]: List of received messages
+            Propagation result with paths and statistics
         """
-        received: list[ReceivedMessage] = []
-        visited: set[str] = {sender.id}
-        queue: deque[tuple[str, int]] = deque()
+        # Initialize state: 1 if agent has message, 0 otherwise
+        has_message = np.zeros(self.n_agents, dtype=np.float64)
+        source_indices = [self.agent_index[a] for a in source_agents if a in self.agent_index]
+        has_message[source_indices] = 1.0
 
-        # Initialize with direct neighbors
-        try:
-            for neighbor in graph.neighbors(sender.id):
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, 1))  # depth 1
-        except nx.NetworkXError:
-            return received
+        # Track propagation paths
+        all_paths: list[tuple[str, str, int]] = []
+        reached_at_depth: dict[int, set[int]] = {0: set(source_indices)}
 
-        max_depth = self.rules.max_propagation_depth
-        decay = self.rules.propagation_decay
+        # Track which agents have received message (ever)
+        ever_received = has_message.copy()
 
-        while queue:
-            current_id, depth = queue.popleft()
+        current_depth = 0
 
-            if depth > max_depth:
-                continue
+        while current_depth < max_depth:
+            # Find agents who currently have message and will propagate
+            current_holders = has_message > 0
 
-            current_agent = agents.get(current_id)
-            if not current_agent:
-                continue
+            if not np.any(current_holders):
+                break
 
-            edge = relationships.get(sender.id, current_id)
+            # Compute potential receivers: adjacency * current_holders
+            # This gives count of how many current holders each agent is connected to
+            potential_receivers = self.adjacency.T @ current_holders.astype(np.float64)
 
-            # Calculate receive probability
-            receive_prob = edge.trust * (decay ** (depth - 1))
+            # Apply propagation probability
+            # For each potential receiver, probability = 1 - product(1 - p_i)
+            # where p_i = trust-based probability from each holder
+            propagation_scores = np.zeros(self.n_agents)
 
-            # Stochastic filtering
-            import random
-            if random.random() > receive_prob:
-                continue
+            for i in range(self.n_agents):
+                if current_holders[i]:
+                    # This agent holds the message - compute its contribution
+                    trust_to_others = self.propagation_prob[i, :]
+                    contribution = trust_to_others * self.adjacency[i, :]
+                    propagation_scores += contribution
 
-            # Get receiver's stance for distortion calculation
-            receiver_stance = current_agent.get_stance(message.topic_id)
-            original_stance = message.original_stance
+            # Agents receive message if propagation score > random threshold
+            # For deterministic simulation, use threshold
+            will_receive = (propagation_scores > 0.5) & (ever_received == 0)
 
-            # Apply cognitive distortion if enabled
-            distorted_content = message.content
-            distortion_applied = False
+            # Record paths for newly reached agents
+            new_receivers = np.where(will_receive)[0]
+            for receiver in new_receivers:
+                # Find which holders sent to this receiver
+                for holder in np.where(current_holders)[0]:
+                    if self.adjacency[holder, receiver] > 0:
+                        all_paths.append(
+                            (self.agent_ids[holder], self.agent_ids[receiver], current_depth + 1)
+                        )
 
-            if self.rules.distortion_coefficient > 0:
-                distorted_content, distortion_applied = self._apply_distortion(
-                    content=message.content,
-                    original_stance=original_stance,
-                    receiver_stance=receiver_stance.position if receiver_stance else 0.0,
-                    receiver_confidence=receiver_stance.confidence if receiver_stance else 0.5,
-                    receiver_role=current_agent.persona.role,
-                )
+            # Update states
+            has_message = will_receive.astype(np.float64)
+            ever_received = np.clip(ever_received + has_message, 0, 1)
 
-            # Create received message
-            received_msg = Message(
-                content=distorted_content,
-                sender_id=message.sender_id,
-                receiver_id=current_id,
-                topic_id=message.topic_id,
-                original_stance=message.original_stance,
-                timestamp=datetime.now(),
+            if np.any(has_message):
+                reached_at_depth[current_depth + 1] = set(new_receivers)
+                current_depth += 1
+            else:
+                break
+
+        # Build result
+        reached_indices = np.where(ever_received > 0)[0]
+        reached_agents = {self.agent_ids[i] for i in reached_indices}
+
+        return PropagationResult(
+            reached_agents=reached_agents,
+            propagation_paths=all_paths,
+            depth_reached=current_depth,
+            successful_propagations=len(all_paths),
+        )
+
+    def propagate_batch(
+        self,
+        batches: list[PropagationBatch],
+        max_depth: int = 3,
+    ) -> list[PropagationResult]:
+        """Propagate multiple message batches in parallel.
+
+        Args:
+            batches: List of propagation batches
+            max_depth: Maximum propagation depth
+
+        Returns:
+            List of propagation results
+        """
+        return [self._propagate_batch_single(batch, max_depth) for batch in batches]
+
+    def _propagate_batch_single(
+        self,
+        batch: PropagationBatch,
+        max_depth: int,
+    ) -> PropagationResult:
+        """Propagate a single batch.
+
+        Args:
+            batch: Propagation batch
+            max_depth: Maximum depth
+
+        Returns:
+            Propagation result
+        """
+        # Convert batch sender IDs to indices
+        source_indices = []
+        for sender_id in batch.sender_ids:
+            if sender_id in self.agent_index:
+                source_indices.append(self.agent_index[sender_id])
+
+        if not source_indices:
+            return PropagationResult(
+                reached_agents=set(),
+                propagation_paths=[],
+                depth_reached=0,
+                successful_propagations=0,
             )
 
-            received.append(ReceivedMessage(
-                message=received_msg,
-                from_agent=sender.id,
-                to_agent=current_id,
-                depth=depth,
-                distortion_applied=distortion_applied,
-                trust_at_reception=edge.trust * (decay ** (depth - 1)),
-            ))
+        # Weight by trust levels
+        trust_weights = np.array(batch.trust_levels)
+        if len(trust_weights) > 0:
+            avg_trust = np.mean(np.clip(trust_weights, -1, 1))
+        else:
+            avg_trust = 0.0
 
-            # Continue propagation
-            try:
-                for neighbor in graph.neighbors(current_id):
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        queue.append((neighbor, depth + 1))
-            except nx.NetworkXError:
-                continue
+        # Run propagation with trust-weighted probabilities
+        has_message = np.zeros(self.n_agents, dtype=np.float64)
+        has_message[source_indices] = 1.0
 
-        return received
+        ever_received = has_message.copy()
+        all_paths: list[tuple[str, str, int]] = []
+        current_depth = 0
 
-    def _apply_distortion(
+        # Adjust propagation probability by batch trust
+        adjusted_prob = self.propagation_prob * (0.5 + 0.5 * (avg_trust + 1) / 2)
+
+        while current_depth < max_depth:
+            current_holders = has_message > 0
+
+            if not np.any(current_holders):
+                break
+
+            # Vectorized propagation computation
+            propagation_scores = np.zeros(self.n_agents)
+
+            holder_indices = np.where(current_holders)[0]
+            if len(holder_indices) > 0:
+                # Sum contributions from all holders (vectorized)
+                contributions = adjusted_prob[holder_indices, :].sum(axis=0)
+                propagation_scores = contributions
+
+            # Apply threshold with trust-weighted randomness simulation
+            threshold = 0.3 + 0.4 * (1 - avg_trust)  # Higher trust = lower threshold
+            will_receive = (propagation_scores > threshold) & (ever_received == 0)
+
+            # Record paths
+            new_receivers = np.where(will_receive)[0]
+            for receiver in new_receivers:
+                for holder in holder_indices:
+                    if self.adjacency[holder, receiver] > 0:
+                        all_paths.append(
+                            (self.agent_ids[holder], self.agent_ids[receiver], current_depth + 1)
+                        )
+
+            # Update states
+            has_message = will_receive.astype(np.float64)
+            ever_received = np.clip(ever_received + has_message, 0, 1)
+
+            if np.any(has_message):
+                current_depth += 1
+            else:
+                break
+
+        reached_indices = np.where(ever_received > 0)[0]
+        reached_agents = {self.agent_ids[i] for i in reached_indices}
+
+        return PropagationResult(
+            reached_agents=reached_agents,
+            propagation_paths=all_paths,
+            depth_reached=current_depth,
+            successful_propagations=len(all_paths),
+        )
+
+    def compute_reach_probability(
         self,
-        content: str,
-        original_stance: float,
-        receiver_stance: float,
-        receiver_confidence: float,
-        receiver_role: str,
-    ) -> tuple[str, bool]:
-        """Apply cognitive distortion to message.
-
-        People tend to accept information that confirms their worldview
-        and distort or filter out contradictory information.
+        source: str,
+        target: str,
+        max_depth: int = 3,
+    ) -> float:
+        """Compute probability that message from source reaches target.
 
         Args:
-            content: Original content
-            original_stance: Sender's stance
-            receiver_stance: Receiver's stance
-            receiver_confidence: Receiver's confidence
-            receiver_role: Receiver's role
+            source: Source agent ID
+            target: Target agent ID
+            max_depth: Maximum propagation depth
 
         Returns:
-            tuple[str, bool]: (distorted content, whether distortion was applied)
+            Reach probability in [0, 1]
         """
-        stance_diff = abs(receiver_stance - original_stance)
-        distortion_factor = stance_diff * self.rules.distortion_coefficient
+        if source not in self.agent_index or target not in self.agent_index:
+            return 0.0
 
-        if distortion_factor < 0.05:
-            return content, False
+        source_idx = self.agent_index[source]
+        target_idx = self.agent_index[target]
 
-        # TODO: Replace with actual LLM call for realistic distortion
-        # For MVP, simple rule-based distortion
+        # Use matrix power to compute multi-hop probabilities
+        # P(reach in d hops) = (adjacency ^ d)[source, target]
 
-        # If receiver strongly disagrees, tend to dismiss
-        if stance_diff > 0.7 and receiver_confidence > 0.6:
-            return f"[Filtered: Contradicts worldview] {content[:50]}...", True
+        prob = 0.0
+        current_prob = np.eye(self.n_agents)  # Start with identity
 
-        # If slight disagreement, soften
-        if stance_diff > 0.3:
-            return f"[Questionable] {content}", True
+        for depth in range(1, max_depth + 1):
+            # Multiply by adjacency (weighted by trust)
+            current_prob = current_prob @ (self.adjacency * self.propagation_prob)
 
-        return content, False
+            # Add probability of reaching at this depth
+            depth_prob = current_prob[source_idx, target_idx]
 
-    def propagate_simple(
+            # Probability of first reaching at this depth
+            prob += depth_prob * (1 - prob)
+
+            if prob >= 0.99:
+                break
+
+        return float(np.clip(prob, 0, 1))
+
+
+class FastBFSPropagator:
+    """Optimized BFS propagator for small networks or single queries.
+
+    Uses traditional BFS but optimized with NumPy for neighbor lookups.
+    More memory-efficient than full matrix approach for sparse networks.
+    """
+
+    def __init__(
         self,
-        message: Message,
-        sender_id: str,
-        recipient_ids: list[str],
-        relationships: RelationshipMap,
-    ) -> list[ReceivedMessage]:
-        """Simple single-hop propagation.
-
-        For MVP - no BFS, just direct recipients.
+        agent_ids: list[str],
+        trust_matrix: np.ndarray,
+        trust_threshold: float = 0.0,
+    ):
+        """Initialize fast BFS propagator.
 
         Args:
-            message: Message to propagate
-            sender_id: Sender agent ID
-            recipient_ids: List of recipient IDs
-            relationships: Relationship map
+            agent_ids: Ordered list of agent IDs
+            trust_matrix: Trust adjacency matrix
+            trust_threshold: Minimum trust for propagation
+        """
+        self.agent_ids = agent_ids
+        self.agent_index = {aid: i for i, aid in enumerate(agent_ids)}
+        self.n_agents = len(agent_ids)
+
+        # Store sparse representation: dict of neighbor lists
+        self.neighbors: dict[int, list[tuple[int, float]]] = {}
+
+        for i in range(self.n_agents):
+            self.neighbors[i] = []
+            for j in range(self.n_agents):
+                if i != j and trust_matrix[i, j] >= trust_threshold:
+                    self.neighbors[i].append((j, trust_matrix[i, j]))
+
+    def propagate(
+        self,
+        source_agents: list[str],
+        max_depth: int = 3,
+    ) -> PropagationResult:
+        """Propagate using optimized BFS.
+
+        Args:
+            source_agents: Initial message holders
+            max_depth: Maximum depth
 
         Returns:
-            list[ReceivedMessage]: Received messages
+            Propagation result
         """
-        received = []
-        for rid in recipient_ids:
-            edge = relationships.get(sender_id, rid)
-            trust = max(0.0, edge.trust)
+        # Initialize BFS
+        queue: list[tuple[int, int]] = []  # (agent_idx, depth)
+        visited = set()
+        paths: list[tuple[str, str, int]] = []
 
-            import random
-            if random.random() > trust:
+        for agent_id in source_agents:
+            if agent_id in self.agent_index:
+                idx = self.agent_index[agent_id]
+                queue.append((idx, 0))
+                visited.add(idx)
+
+        head = 0
+        max_reached_depth = 0
+
+        while head < len(queue):
+            current_idx, depth = queue[head]
+            head += 1
+
+            if depth >= max_depth:
                 continue
 
-            received.append(ReceivedMessage(
-                message=message,
-                from_agent=sender_id,
-                to_agent=rid,
-                depth=1,
-                distortion_applied=False,
-                trust_at_reception=trust,
-            ))
+            max_reached_depth = max(max_reached_depth, depth)
 
-        return received
+            # Process neighbors
+            for neighbor_idx, trust in self.neighbors.get(current_idx, []):
+                # Probabilistic propagation based on trust
+                prob = (trust + 1) / 2  # [-1, 1] -> [0, 1]
+
+                if neighbor_idx not in visited and np.random.random() < prob:
+                    visited.add(neighbor_idx)
+                    queue.append((neighbor_idx, depth + 1))
+                    paths.append(
+                        (self.agent_ids[current_idx], self.agent_ids[neighbor_idx], depth + 1)
+                    )
+
+        reached_agents = {self.agent_ids[i] for i in visited}
+
+        return PropagationResult(
+            reached_agents=reached_agents,
+            propagation_paths=paths,
+            depth_reached=max_reached_depth,
+            successful_propagations=len(paths),
+        )
 
 
-def create_message(
-    content: str,
-    sender_id: str,
-    topic_id: str,
-    original_stance: float = 0.0,
-    receiver_id: str = "",
-) -> Message:
-    """Create a new message.
+def create_propagator(
+    agent_ids: list[str],
+    trust_matrix: np.ndarray,
+    trust_threshold: float = 0.0,
+    use_vectorized: bool = True,
+) -> VectorizedPropagator | FastBFSPropagator:
+    """Factory function to create appropriate propagator.
 
     Args:
-        content: Message content
-        sender_id: Sender ID
-        topic_id: Topic ID
-        original_stance: Sender's stance
-        receiver_id: Optional specific receiver
+        agent_ids: Ordered list of agent IDs
+        trust_matrix: Trust adjacency matrix
+        trust_threshold: Minimum trust for propagation
+        use_vectorized: Use vectorized (True) or BFS (False) approach
 
     Returns:
-        Message: Created message
+        Configured propagator instance
     """
-    return Message(
-        content=content,
-        sender_id=sender_id,
-        receiver_id=receiver_id,
-        topic_id=topic_id,
-        original_stance=original_stance,
-        timestamp=datetime.now(),
-    )
+    if use_vectorized and len(agent_ids) >= 20:
+        return VectorizedPropagator(agent_ids, trust_matrix, trust_threshold)
+    else:
+        return FastBFSPropagator(agent_ids, trust_matrix, trust_threshold)

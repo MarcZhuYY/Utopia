@@ -9,12 +9,7 @@ This layer implements the cognitive system for each agent:
 
 from utopia.layer3_cognition.agent import Agent
 from utopia.layer3_cognition.memory import MemorySystem, MemoryItem
-from utopia.layer3_cognition.beliefs import BeliefSystem, Stance, BeliefDelta
-from utopia.layer3_cognition.beliefs_v2 import BayesianBeliefSystem, BayesianBeliefDelta
-from utopia.layer3_cognition.memory_consolidation import (
-    MemoryConsolidationSystem,
-    MemoryCluster,
-)
+from utopia.layer3_cognition.beliefs import BayesianBeliefSystem, BayesianBeliefDelta
 from utopia.layer3_cognition.persona_anchor import (
     PersonaAnchorSystem,
     PersonaState,
@@ -27,10 +22,9 @@ from utopia.layer3_cognition.warm_memory_models import (
     ColdMemory,
     HotMemoryItem,
     WarmMemoryItem,
-    PendingEmbeddingItem,
     RetrievedMemory,
 )
-from utopia.layer3_cognition.memory_3tier import MemorySystem3Tier
+from utopia.layer3_cognition.memory import MemorySystem3Tier
 
 # Phase 10: Agent Persona templates with Pydantic v2
 from utopia.layer3_cognition.agent_persona_models import (
@@ -47,16 +41,8 @@ __all__ = [
     "Agent",
     "MemorySystem",
     "MemoryItem",
-    "BeliefSystem",
-    "Stance",
-    "BeliefDelta",
     "BayesianBeliefSystem",
     "BayesianBeliefDelta",
-    "MemoryConsolidationSystem",
-    "MemoryCluster",
-    "PersonaAnchorSystem",
-    "PersonaState",
-    "CoreConflict",
     "AgentDecisionEngine",
     "Decision",
     "AttentionItem",
@@ -65,7 +51,6 @@ __all__ = [
     "ColdMemory",
     "HotMemoryItem",
     "WarmMemoryItem",
-    "PendingEmbeddingItem",
     "RetrievedMemory",
     # Phase 10: Agent Persona templates
     "AgentRole",

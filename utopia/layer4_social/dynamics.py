@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from utopia.layer3_cognition.beliefs import BeliefSystem
+from utopia.layer3_cognition.beliefs import BayesianBeliefSystem
 
 if TYPE_CHECKING:
     from utopia.layer3_cognition.agent import Agent

@@ -10,7 +10,7 @@ import numpy as np
 from datetime import datetime
 
 from utopia.layer3_cognition.warm_memory_models import ColdMemory
-from utopia.layer3_cognition.memory_3tier import MemorySystem3Tier
+from utopia.layer3_cognition.memory import MemorySystem3Tier
 from utopia.layer5_engine.batch_embedding_processor import (
     BatchEmbeddingProcessor,
     MockBatchEmbeddingProcessor,

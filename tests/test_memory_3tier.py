@@ -13,7 +13,7 @@ from utopia.layer3_cognition.warm_memory_models import (
     WarmMemoryItem,
     RetrievedMemory,
 )
-from utopia.layer3_cognition.memory_3tier import MemorySystem3Tier
+from utopia.layer3_cognition.memory import MemorySystem3Tier
 
 
 @pytest.fixture

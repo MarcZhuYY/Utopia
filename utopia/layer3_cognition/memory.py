@@ -1,214 +1,494 @@
-"""Memory system for agents.
+"""3-tier memory system implementation.
 
-Implements short-term (FIFO) and long-term memory with importance-based promotion.
+Hot/Warm/Cold memory architecture with Smart RAG retrieval.
 """
 
 from __future__ import annotations
 
-import math
+import threading
 from collections import deque
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Generator, Optional
+
+import numpy as np
 
 from utopia.core.models import MemoryItem
-from utopia.core.config import WorldRules
+from utopia.layer3_cognition.warm_memory_models import (
+    ColdMemory,
+    HotMemoryItem,
+    PendingEmbeddingItem,
+    RetrievedMemory,
+    WarmMemoryItem,
+)
+
+if TYPE_CHECKING:
+    pass
 
 
-class MemorySystem:
-    """Agent memory system with short-term and long-term storage.
+class MemorySystem3Tier:
+    """3-tier 分层内存系统.
 
-    Memory flow:
-    1. New information enters short-term memory
-    2. When capacity exceeded, weighted eviction occurs
-    3. High-importance or emotional items promote to long-term
+    Architecture:
+    - Cold Memory: Persona, goals, high-confidence stances - always in system prompt
+    - Hot Memory: Recent 1-3 ticks, no embedding, fast keyword search
+    - Warm Memory: Consolidated experiences with vector embeddings
+
+    Attributes:
+        agent_id: Agent identifier
+        cold: ColdMemory - static persona and beliefs
+        hot: deque[HotMemoryItem] - recent experiences (no embedding)
+        warm: list[WarmMemoryItem] - consolidated experiences (with vectors)
+        pending_embeddings: list[PendingEmbeddingItem] - queue for batch processing
     """
 
-    MAX_SHORT_TERM = 20  # Default capacity
-    LONG_TERM_PROMOTION_THRESHOLD = 0.7
-    EMOTIONAL_PROMOTION_THRESHOLD = 0.8
+    DEFAULT_HOT_MAXLEN = 10
+    DEFAULT_WARM_MAX_SIZE = 1000
+    DEFAULT_IMPORTANCE_THRESHOLD = 0.3
+    DEFAULT_VECTOR_DIM = 768  # text-embedding-3-small
 
     def __init__(
         self,
-        short_term_capacity: int = MAX_SHORT_TERM,
-        promotion_threshold: float = LONG_TERM_PROMOTION_THRESHOLD,
-        emotional_threshold: float = EMOTIONAL_PROMOTION_THRESHOLD,
-        half_life_hours: float = 48.0,
-    ):
-        """Initialize memory system.
-
-        Args:
-            short_term_capacity: Max short-term memory items
-            promotion_threshold: Importance threshold for long-term promotion
-            emotional_threshold: Emotional valence threshold for promotion
-            half_life_hours: Memory half-life for time decay
-        """
-        self.short_term: deque[MemoryItem] = deque(maxlen=short_term_capacity)
-        self.long_term: list[MemoryItem] = []
-        self._short_term_capacity = short_term_capacity
-        self._promotion_threshold = promotion_threshold
-        self._emotional_threshold = emotional_threshold
-        self._half_life_hours = half_life_hours
-
-    def add(
-        self,
-        item: MemoryItem,
         agent_id: str,
-        topic_id: Optional[str] = None,
+        cold_memory: ColdMemory,
+        hot_memory_maxlen: int = DEFAULT_HOT_MAXLEN,
+        warm_memory_max_size: int = DEFAULT_WARM_MAX_SIZE,
+        importance_threshold: float = DEFAULT_IMPORTANCE_THRESHOLD,
+    ):
+        """Initialize 3-tier memory system.
+
+        Args:
+            agent_id: Agent identifier
+            cold_memory: Cold memory (persona, goals, etc.)
+            hot_memory_maxlen: Max size of hot memory buffer
+            warm_memory_max_size: Max size of warm memory
+            importance_threshold: Min importance to enter warm memory queue
+        """
+        self.agent_id = agent_id
+        self.cold = cold_memory
+
+        # Hot Memory: collections.deque，无需 embedding
+        self.hot: deque[HotMemoryItem] = deque(maxlen=hot_memory_maxlen)
+
+        # Warm Memory: 带向量的 consolidation 经验
+        self.warm: list[WarmMemoryItem] = []
+        self.warm_max_size = warm_memory_max_size
+        self._importance_threshold = importance_threshold
+
+        # 待处理的 embedding 队列 (Lazy Batch Embedding 关键)
+        self.pending_embeddings: list[PendingEmbeddingItem] = []
+
+        # 向量索引 (numpy 暴力搜索，可替换为 FAISS)
+        self._vector_index: Optional[np.ndarray] = None
+        self._vector_index_dirty: bool = True
+
+        # CRITICAL FIX: Threading locks for vector index safety
+        self._vector_lock = threading.RLock()  # Protects vector index
+        self._warm_lock = threading.Lock()  # Protects warm memory list
+        self._hot_lock = threading.Lock()  # Protects hot memory deque
+
+    @contextmanager
+    def _vector_index_context(self) -> Generator[Optional[np.ndarray], None, None]:
+        """Context manager for thread-safe vector index access.
+
+        CRITICAL FIX: Ensures exclusive access during index rebuild and search.
+
+        Yields:
+            Current vector index (may be None if empty)
+        """
+        with self._vector_lock:
+            # Rebuild if needed (under lock)
+            if self._vector_index_dirty or self._vector_index is None:
+                self._rebuild_vector_index_unsafe()
+            yield self._vector_index
+
+    def add_experience(
+        self,
+        content: str,
+        topic_id: str,
+        importance: float,
+        source_agent: Optional[str] = None,
+        emotional_valence: float = 0.0,
+        keywords: Optional[list[str]] = None,
     ) -> None:
-        """Add item to memory.
+        """添加新经验到 Hot Memory，同时加入 pending_embeddings.
 
         Args:
-            item: Memory item to add
-            agent_id: Agent adding this memory
-            topic_id: Optional topic association
+            content: Experience content
+            topic_id: Associated topic
+            importance: Importance score [0, 1]
+            source_agent: Source agent ID (if from another agent)
+            emotional_valence: Emotional valence [-1, 1]
+            keywords: Keywords for fast matching
         """
-        # Check for duplicates
-        if self._is_duplicate(item, agent_id):
-            return
-
-        # Add to short-term
-        self.short_term.append(item)
-
-        # Check promotion criteria
-        if self._should_promote(item):
-            self._promote_to_long_term(item)
-
-    def _is_duplicate(self, item: MemoryItem, agent_id: str) -> bool:
-        """Check if item is duplicate of recent memory.
-
-        Args:
-            item: Item to check
-            agent_id: Agent ID
-
-        Returns:
-            bool: True if duplicate
-        """
-        # Simple content-based dedup for recent items
-        content_hash = hash(item.content.lower().strip())
-        for existing in list(self.short_term)[-5:]:  # Check last 5
-            if hash(existing.content.lower().strip()) == content_hash:
-                return True
-        return False
-
-    def _should_promote(self, item: MemoryItem) -> bool:
-        """Check if item should promote to long-term.
-
-        Args:
-            item: Item to check
-
-        Returns:
-            bool: True if should promote
-        """
-        return (
-            item.importance >= self._promotion_threshold
-            or abs(item.emotional_valence) >= self._emotional_threshold
+        # 1. 加入 Hot Memory (立即可用，无需 embedding)
+        hot_item = HotMemoryItem(
+            content=content,
+            topic_id=topic_id,
+            timestamp=datetime.now(),
+            importance=importance,
+            source_agent=source_agent,
+            emotional_valence=emotional_valence,
+            keywords=keywords or [],
         )
+        self.hot.append(hot_item)
 
-    def _promote_to_long_term(self, item: MemoryItem) -> None:
-        """Promote item to long-term memory.
+        # 2. 加入 pending queue，等待批量 embedding
+        # 只有当 importance > 阈值时才进入 Warm Memory
+        if importance >= self._importance_threshold:
+            pending = PendingEmbeddingItem(
+                agent_id=self.agent_id,
+                text=content,
+                metadata={
+                    "topic_id": topic_id,
+                    "importance": importance,
+                    "timestamp": datetime.now().isoformat(),
+                    "source_agent": source_agent,
+                    "emotional_valence": emotional_valence,
+                },
+            )
+            self.pending_embeddings.append(pending)
 
-        Generates a summary to save storage.
+    def retrieve_relevant(
+        self,
+        query: str,
+        query_vector: Optional[np.ndarray] = None,
+        topic_id: Optional[str] = None,
+        k: int = 5,
+    ) -> list[RetrievedMemory]:
+        """Smart RAG 检索 - Hot -> Warm 优先级.
 
         Args:
-            item: Item to promote
-        """
-        # For MVP, just store as-is (can add summarization later)
-        self.long_term.append(item)
+            query: Query string
+            query_vector: Pre-computed query embedding (optional)
+            topic_id: Filter by topic
+            k: Max results to return
 
-    def retrieve(
+        Returns:
+            list[RetrievedMemory]: Retrieved memories, Hot first then Warm
+        """
+        results: list[RetrievedMemory] = []
+
+        # Step 1: Hot Memory 关键词匹配 (O(n) 线性扫描)
+        hot_matches = self._search_hot_memory(query, topic_id)
+        results.extend([r.to_retrieved() for r in hot_matches])
+
+        # 如果 Hot Memory 已足够，直接返回 (Early Return)
+        if len(results) >= k:
+            return results[:k]
+
+        # Step 2: Warm Memory 向量相似度搜索
+        remaining = k - len(results)
+        if self.warm and (query_vector is not None or query):
+            warm_matches = self._search_warm_memory(
+                query_vector=query_vector,
+                query_text=query if query_vector is None else None,
+                topic_id=topic_id,
+                k=remaining,
+            )
+            results.extend(warm_matches)
+
+        return results[:k]
+
+    def _search_hot_memory(
         self,
         query: str,
         topic_id: Optional[str] = None,
-        limit: int = 5,
-    ) -> list[MemoryItem]:
-        """Retrieve relevant memories.
-
-        For MVP, uses simple relevance scoring.
-        Phase 2: Use vector embeddings for semantic search.
+    ) -> list[HotMemoryItem]:
+        """Hot Memory 关键词搜索 - 无需 embedding.
 
         Args:
             query: Query string
             topic_id: Filter by topic
-            limit: Maximum results
 
         Returns:
-            list[MemoryItem]: Retrieved memories
+            list[HotMemoryItem]: Matching hot memories
         """
-        # Combine short and long term
-        candidates = list(self.short_term) + self.long_term
+        query_keywords = set(query.lower().split()) if query else set()
+        matches: list[tuple[int, HotMemoryItem]] = []
 
-        # Filter by topic if specified
-        if topic_id:
-            # For now, topic_id is stored in content or via association
-            # Simple filter: check if topic appears in content
-            candidates = [
-                c for c in candidates
-                if topic_id.lower() in c.content.lower()
-            ]
+        for item in self.hot:
+            # 主题过滤
+            if topic_id and item.topic_id != topic_id:
+                continue
 
-        # Score by relevance, importance, and recency
-        scored = []
-        for item in candidates:
-            # Simple relevance: keyword overlap
-            query_words = set(query.lower().split())
-            content_words = set(item.content.lower().split())
-            relevance = len(query_words & content_words) / max(len(query_words), 1)
+            # 如果没有 query，直接加入（已通过 topic 过滤）
+            if not query_keywords:
+                matches.append((1, item))
+                continue
 
-            # Recency decay
-            recency = self._time_decay(item.timestamp)
+            # 关键词匹配
+            match_score = 0
+            item_text = item.content.lower()
 
-            # Combined score
-            score = relevance * 0.4 + item.importance * 0.4 + recency * 0.2
-            scored.append((score, item))
+            # 内容关键词匹配
+            for kw in query_keywords:
+                if kw in item_text:
+                    match_score += 1
 
-        scored.sort(reverse=True, key=lambda x: x[0])
-        return [item for _, item in scored[:limit]]
+            # 预提取关键词匹配 (bonus)
+            for kw in item.keywords:
+                if kw.lower() in query_keywords:
+                    match_score += 2
 
-    def _time_decay(self, timestamp: datetime) -> float:
-        """Calculate time decay factor.
+            if match_score > 0:
+                matches.append((match_score, item))
 
-        Uses exponential decay with half-life.
+        # 按匹配分数降序
+        matches.sort(key=lambda x: x[0], reverse=True)
+        return [item for _, item in matches]
+
+    def _search_warm_memory(
+        self,
+        query_vector: Optional[np.ndarray] = None,
+        query_text: Optional[str] = None,
+        topic_id: Optional[str] = None,
+        k: int = 3,
+    ) -> list[RetrievedMemory]:
+        """Warm Memory 向量相似度搜索.
 
         Args:
-            timestamp: Item timestamp
+            query_vector: Query embedding vector
+            query_text: Query text (fallback if no vector)
+            topic_id: Filter by topic
+            k: Max results
 
         Returns:
-            float: Decay factor (0-1)
+            list[RetrievedMemory]: Retrieved warm memories
         """
-        age_hours = (datetime.now() - timestamp).total_seconds() / 3600
-        return math.exp(-age_hours / self._half_life_hours)
+        if not self.warm:
+            return []
 
-    def get_recent(self, limit: int = 10) -> list[MemoryItem]:
-        """Get most recent memories.
+        # 如果没有 query_vector，暂时返回基于文本的匹配
+        # 实际使用中，query_vector 应该由调用方预计算
+        if query_vector is None:
+            return self._search_warm_memory_fallback(query_text or "", topic_id, k)
+
+        # CRITICAL FIX: Thread-safe vector index access
+        with self._vector_lock:
+            # Rebuild if needed
+            if self._vector_index_dirty or self._vector_index is None:
+                self._rebuild_vector_index_unsafe()
+
+            if self._vector_index is None or len(self._vector_index) == 0:
+                return []
+
+            # NumPy 向量搜索 (点积相似度)
+            similarities = self._vector_index @ query_vector  # shape: (N,)
+
+        # 获取 top-k (after releasing lock)
+        top_k_indices = np.argsort(similarities)[-k:][::-1]
+
+        results: list[RetrievedMemory] = []
+        for idx in top_k_indices:
+            if idx >= len(self.warm):
+                continue
+
+            # CRITICAL FIX: Access warm memory under lock
+            with self._warm_lock:
+                warm_item = self.warm[idx]
+
+            # 主题过滤
+            if topic_id and topic_id not in warm_item.topic_ids:
+                continue
+
+            # 更新访问统计
+            warm_item.access_count += 1
+            warm_item.last_accessed = datetime.now()
+
+            results.append(
+                RetrievedMemory(
+                    text=warm_item.text,
+                    source="warm",
+                    importance=warm_item.importance_score,
+                    timestamp=warm_item.timestamp,
+                    similarity=float(similarities[idx]),
+                    topic_id=warm_item.topic_ids[0] if warm_item.topic_ids else None,
+                )
+            )
+
+        return results
+
+    def _search_warm_memory_fallback(
+        self,
+        query: str,
+        topic_id: Optional[str] = None,
+        k: int = 3,
+    ) -> list[RetrievedMemory]:
+        """Warm Memory 文本回退搜索 (无向量时)."""
+        query_keywords = set(query.lower().split())
+        matches: list[tuple[int, WarmMemoryItem]] = []
+
+        for item in self.warm:
+            if topic_id and topic_id not in item.topic_ids:
+                continue
+
+            item_text = item.text.lower()
+            match_score = sum(1 for kw in query_keywords if kw in item_text)
+
+            if match_score > 0:
+                matches.append((match_score, item))
+
+        matches.sort(key=lambda x: x[0], reverse=True)
+
+        return [
+            RetrievedMemory(
+                text=item.text,
+                source="warm",
+                importance=item.importance_score,
+                timestamp=item.timestamp,
+                similarity=0.0,  # 无相似度分数
+                topic_id=item.topic_ids[0] if item.topic_ids else None,
+            )
+            for _, item in matches[:k]
+        ]
+
+    def _rebuild_vector_index_unsafe(self) -> None:
+        """重建向量索引 - 必须在持有 _vector_lock 时调用.
+
+        CRITICAL FIX: Unsafe version - caller must hold lock!
+        """
+        if not self.warm:
+            self._vector_index = None
+            self._vector_index_dirty = False
+            return
+
+        # 收集所有向量
+        vectors = []
+        for item in self.warm:
+            if item.vector is not None:
+                vectors.append(item.vector)
+            else:
+                # 填充零向量 (不应发生)
+                vectors.append(np.zeros(self.DEFAULT_VECTOR_DIM, dtype=np.float32))
+
+        if vectors:
+            self._vector_index = np.stack(vectors)
+        else:
+            self._vector_index = None
+
+        self._vector_index_dirty = False
+
+    def on_batch_embeddings_received(
+        self,
+        embeddings: list[tuple[str, np.ndarray, dict[str, Any]]],
+    ) -> None:
+        """接收引擎分发的批量 embedding 结果.
 
         Args:
-            limit: Maximum items
+            embeddings: List of (text, vector, metadata) tuples
+        """
+        # CRITICAL FIX: Thread-safe batch embedding reception
+        with self._warm_lock:
+            for text, vector, metadata in embeddings:
+                warm_item = WarmMemoryItem(
+                    text=text,
+                    vector=vector,
+                    timestamp=datetime.fromisoformat(metadata["timestamp"]),
+                    importance_score=metadata.get("importance", 0.5),
+                    last_accessed=datetime.now(),
+                    topic_ids=[metadata.get("topic_id", "")] if metadata.get("topic_id") else [],
+                    related_agents=[metadata.get("source_agent")] if metadata.get("source_agent") else [],
+                )
+                self.warm.append(warm_item)
+
+        # CRITICAL FIX: Mark index dirty under vector lock
+        with self._vector_lock:
+            self._vector_index_dirty = True
+
+        # 限制 Warm Memory 大小 (outside lock)
+        self._enforce_warm_memory_limit()
+
+    def _enforce_warm_memory_limit(self) -> None:
+        """LRU + 重要性淘汰策略."""
+        # CRITICAL FIX: Thread-safe memory limit enforcement
+        with self._warm_lock:
+            if len(self.warm) <= self.warm_max_size:
+                return
+
+            # 计算综合分数: 重要性 * 0.7 + 访问频率 * 0.2 + 时间衰减 * 0.1
+            now = datetime.now()
+            scored: list[tuple[float, WarmMemoryItem]] = []
+
+            for item in self.warm:
+                # 时间衰减 (最近访问的分数高)
+                hours_since_access = (now - item.last_accessed).total_seconds() / 3600
+                recency_score = np.exp(-hours_since_access / 48.0)  # 48小时半衰期
+
+                # 综合分数
+                score = (
+                    item.importance_score * 0.7
+                    + min(item.access_count / 10.0, 1.0) * 0.2
+                    + recency_score * 0.1
+                )
+                scored.append((score, item))
+
+            # 按分数降序，保留前 N
+            scored.sort(key=lambda x: x[0], reverse=True)
+            self.warm = [item for _, item in scored[: self.warm_max_size]]
+
+        # CRITICAL FIX: Mark index dirty under vector lock
+        with self._vector_lock:
+            self._vector_index_dirty = True
+
+    def get_recent(self, limit: int = 10) -> list[HotMemoryItem]:
+        """获取最近的 Hot Memory.
+
+        Args:
+            limit: Max items to return
 
         Returns:
-            list[MemoryItem]: Recent memories
+            list[HotMemoryItem]: Recent hot memories
         """
-        combined = list(self.short_term) + sorted(
-            self.long_term, key=lambda x: x.timestamp, reverse=True
-        )
-        return combined[:limit]
+        return list(self.hot)[-limit:]
 
-    def get_all(self) -> dict[str, list[dict]]:
-        """Get all memories organized by type.
+    def get_all_warm(self) -> list[WarmMemoryItem]:
+        """获取所有 Warm Memory.
 
         Returns:
-            dict: All memories
+            list[WarmMemoryItem]: All warm memories
         """
-        return {
-            "short_term": [m.to_dict() for m in self.short_term],
-            "long_term": [m.to_dict() for m in self.long_term],
-        }
+        return self.warm.copy()
 
     def clear(self) -> None:
-        """Clear all memories."""
-        self.short_term.clear()
-        self.long_term.clear()
+        """Clear all memories (except Cold)."""
+        self.hot.clear()
+        self.warm.clear()
+        self.pending_embeddings.clear()
+        self._vector_index = None
+        self._vector_index_dirty = True
 
     def __len__(self) -> int:
-        """Get total memory count."""
-        return len(self.short_term) + len(self.long_term)
+        """Get total memory count (Hot + Warm)."""
+        return len(self.hot) + len(self.warm)
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get memory statistics.
+
+        Returns:
+            dict: Memory stats
+        """
+        return {
+            "agent_id": self.agent_id,
+            "cold_memory_size": len(self.cold.core_goals) + len(self.cold.high_confidence_stances),
+            "hot_memory_size": len(self.hot),
+            "warm_memory_size": len(self.warm),
+            "pending_embeddings": len(self.pending_embeddings),
+            "vector_index_dirty": self._vector_index_dirty,
+        }
+
+
+# Backward compatibility aliases
+MemorySystem = MemorySystem3Tier
+
+__all__ = [
+    "MemorySystem3Tier",
+    "MemorySystem",
+    "MemoryItem",
+    "ColdMemory",
+    "HotMemoryItem",
+    "WarmMemoryItem",
+    "PendingEmbeddingItem",
+    "RetrievedMemory",
+]

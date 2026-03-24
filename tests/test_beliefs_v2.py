@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from utopia.core.pydantic_models import BigFiveTraits, StanceState
-from utopia.layer3_cognition.beliefs_v2 import (
+from utopia.layer3_cognition.beliefs import (
     BayesianBeliefSystem,
     BayesianBeliefDelta,
     _sanitize_float,
