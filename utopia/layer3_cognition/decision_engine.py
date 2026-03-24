@@ -201,8 +201,6 @@ class AgentDecisionEngine:
             agent: Agent to update
             messages: Messages to process
         """
-        from utopia.layer3_cognition.beliefs_v2 import BayesianBeliefSystem
-
         for msg in messages:
             # Get current stance
             agent_stance = agent.get_stance(msg.message.topic_id)

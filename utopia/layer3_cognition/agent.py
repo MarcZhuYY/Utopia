@@ -20,9 +20,13 @@ from utopia.core.models import (
 from utopia.core.pydantic_models import ActivityStatus
 from utopia.layer3_cognition.memory import MemorySystem
 from utopia.layer3_cognition.beliefs import BayesianBeliefSystem
+from utopia.layer3_cognition.warm_memory_models import ColdMemory
 
 if TYPE_CHECKING:
     from utopia.layer4_social.relationships import RelationshipMap
+
+
+_DIRECTION_MAP = {"pro": 1.0, "con": -1.0, "neutral": 0.0}
 
 
 @dataclass
@@ -44,7 +48,9 @@ class Agent:
 
     id: str = field(default_factory=lambda: f"A{uuid.uuid4().hex[:8]}")
     persona: Persona = field(default_factory=Persona)
-    memory: MemorySystem = field(default_factory=MemorySystem)
+    memory: MemorySystem = field(default_factory=lambda: MemorySystem(
+        agent_id="default", cold_memory=ColdMemory()
+    ))
     beliefs: BayesianBeliefSystem = field(default_factory=BayesianBeliefSystem)
     state: AgentState = field(default_factory=AgentState)
     _relationship_map: Optional[Any] = field(default=None, repr=False)
@@ -159,7 +165,14 @@ class Agent:
             direction: pro/con/neutral
             strength: Evidence strength (0-1)
         """
-        self.beliefs.update(topic_id, new_info, self, direction, strength)
+        message_stance = _DIRECTION_MAP.get(direction, 0.0) * strength
+        self.beliefs.bayesian_update(
+            topic_id=topic_id,
+            message_stance=message_stance,
+            intensity=strength,
+            trust_in_sender=0.5,
+            current_tick=0,
+        )
 
     def decay_energy(self, amount: float = 0.05) -> None:
         """Decay agent energy.
@@ -221,7 +234,8 @@ class Agent:
         )
 
         agent = cls(id=entity_id, persona=persona)
-        agent.beliefs.initialize_stances(base_stances)
+        for topic_id, position in base_stances.items():
+            agent.beliefs.initialize_stance(topic_id, position)
 
         return agent
 

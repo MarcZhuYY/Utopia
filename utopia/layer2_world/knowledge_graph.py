@@ -286,10 +286,13 @@ class KnowledgeGraph:
         try:
             edges = nx.bfs_edges(self.graph, agent_id, depth_limit=max_depth)
             for from_node, to_node in edges:
-                edge_data = self.graph.get_edge_data(from_node, to_node)
-                if edge_data and edge_data.get("edge_type") == EdgeType.INFLUENCES.value:
-                    weight = edge_data.get("weight", 1.0)
-                    influenced[to_node] = influenced.get(to_node, 0) + weight
+                edge_dict = self.graph.get_edge_data(from_node, to_node)
+                if not edge_dict:
+                    continue
+                for edge_data in edge_dict.values():
+                    if edge_data.get("edge_type") == EdgeType.INFLUENCES.value:
+                        weight = edge_data.get("weight", 1.0)
+                        influenced[to_node] = influenced.get(to_node, 0) + weight
         except nx.NetworkXError:
             pass
         return influenced
@@ -336,9 +339,11 @@ class KnowledgeGraph:
         """
         graph = cls()
         for node in data.get("nodes", []):
+            node = dict(node)  # avoid mutating input
             node_id = node.pop("id")
             graph.graph.add_node(node_id, **node)
         for edge in data.get("edges", []):
+            edge = dict(edge)  # avoid mutating input
             from_id = edge.pop("from")
             to_id = edge.pop("to")
             graph.graph.add_edge(from_id, to_id, **edge)

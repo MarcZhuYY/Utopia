@@ -5,6 +5,7 @@ This module uses LLM calls to extract structured information from raw text.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any, Optional
@@ -347,7 +348,7 @@ class LLMExtractor:
             raise ValueError("Seed material has no raw_text")
 
         # Check cache
-        cache_key = seed.raw_text[:100]
+        cache_key = hashlib.sha256(seed.raw_text.encode()).hexdigest()
         if self.use_cache and cache_key in self._cache:
             cached = self._cache[cache_key]
             return self._apply_cached(seed, cached)

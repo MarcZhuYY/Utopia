@@ -277,7 +277,11 @@ class GroupDynamicsDetector:
         mean = float(np.mean(stances))
         std = float(np.std(stances))
         positive_ratio = float(np.mean(stances > 0))
-        confidence_weighted_mean = float(np.average(stances, weights=confidences))
+        confidence_weighted_mean = (
+            float(np.average(stances, weights=confidences))
+            if np.sum(confidences) > 0
+            else float(np.mean(stances))
+        )
 
         return {
             "mean": mean,

@@ -275,7 +275,10 @@ class BayesianBeliefSystem:
         # Confidence evolution
         # If sign(Delta) == sign(S_i): consistent with current stance
         # Else: contradictory information
-        if np.sign(delta) == np.sign(old_position):
+        if abs(delta) < 1e-10:
+            # No meaningful update — keep confidence unchanged
+            new_confidence = old_confidence
+        elif np.sign(delta) == np.sign(old_position):
             # Consistent: boost confidence
             # C_new = C_i + (1 - C_i) * T_ij * 0.1
             confidence_boost = (
@@ -340,7 +343,7 @@ class BayesianBeliefSystem:
         consistency = "一致" if np.sign(delta.delta_stance) == np.sign(delta.old_position) else "矛盾"
         reasoning = (
             f"接收到立场={input_data.message_stance:.2f}的信息，"
-            f"强度={input_data.intensity:.2f}，"
+            f"强度={input_data.message_intensity:.2f}，"
             f"来源信任度={input_data.trust_in_sender:.2f}。"
             f"Delta={delta.delta_stance:.3f}，"
             f"与当前立场{consistency}。"

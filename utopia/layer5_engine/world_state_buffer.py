@@ -207,7 +207,7 @@ class WorldStateBuffer:
         if stance_updates:
             agent.stances.update(stance_updates)
 
-        if position:
+        if position is not None:
             agent.position = position
 
     def update_trust(

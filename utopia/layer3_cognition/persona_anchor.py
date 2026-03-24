@@ -449,7 +449,7 @@ def create_default_conflicts(role: str) -> list[CoreConflict]:
                 conflict_id="truth_vs_clicks",
                 description="真相追求 vs 流量最大化",
                 priority=0.6,
-                trigger_conditions=[["爆料", "热点", "独家", "标题"]],
+                trigger_conditions=["爆料", "热点", "独家", "标题"],
             ),
         ]
 

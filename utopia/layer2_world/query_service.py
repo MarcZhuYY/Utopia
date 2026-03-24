@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
+from utopia.layer2_world.knowledge_graph import NodeType, EdgeType
+
 if TYPE_CHECKING:
     from utopia.layer2_world.knowledge_graph import KnowledgeGraph
 
@@ -163,7 +165,7 @@ class KnowledgeGraphQueryService:
 
         # Get all agent nodes from knowledge graph
         for node_id, node_data in self._kg.graph.nodes(data=True):
-            if node_data.get("type") != "agent":
+            if node_data.get("node_type") != NodeType.AGENT.value:
                 continue
             if agent_filter and node_id not in agent_filter:
                 continue
@@ -173,7 +175,7 @@ class KnowledgeGraphQueryService:
             # Get stance relationships
             for _, neighbor, edge_data in self._kg.graph.edges(node_id, data=True):
                 neighbor_data = self._kg.graph.nodes[neighbor]
-                if neighbor_data.get("type") != "topic":
+                if neighbor_data.get("node_type") != NodeType.TOPIC.value:
                     continue
                 if topic_filter and neighbor not in topic_filter:
                     continue
@@ -209,14 +211,14 @@ class KnowledgeGraphQueryService:
         result: dict[tuple[str, str], float] = {}
 
         for node_id, node_data in self._kg.graph.nodes(data=True):
-            if node_data.get("type") != "agent":
+            if node_data.get("node_type") != NodeType.AGENT.value:
                 continue
             if agent_filter and node_id not in agent_filter:
                 continue
 
             for _, neighbor, edge_data in self._kg.graph.edges(node_id, data=True):
                 neighbor_data = self._kg.graph.nodes[neighbor]
-                if neighbor_data.get("type") != "agent":
+                if neighbor_data.get("node_type") != NodeType.AGENT.value:
                     continue
                 if agent_filter and neighbor not in agent_filter:
                     continue
@@ -245,7 +247,7 @@ class KnowledgeGraphQueryService:
         events: list[RecentEvent] = []
 
         for node_id, node_data in self._kg.graph.nodes(data=True):
-            if node_data.get("type") != "event":
+            if node_data.get("node_type") != NodeType.EVENT.value:
                 continue
             if event_types and node_data.get("event_type") not in event_types:
                 continue
@@ -278,7 +280,7 @@ class KnowledgeGraphQueryService:
         topic_mentions: dict[str, int] = {}
 
         for node_id, node_data in self._kg.graph.nodes(data=True):
-            if node_data.get("type") != "topic":
+            if node_data.get("node_type") != NodeType.TOPIC.value:
                 continue
 
             # Count edges (mentions) to this topic
@@ -313,7 +315,7 @@ class KnowledgeGraphQueryService:
         neighbors: list[tuple[str, float]] = []
 
         for _, neighbor, edge_data in self._kg.graph.edges(agent_id, data=True):
-            if relationship_type and edge_data.get("type") != relationship_type:
+            if relationship_type and edge_data.get("edge_type") != relationship_type:
                 continue
 
             weight = edge_data.get("weight", 1.0)

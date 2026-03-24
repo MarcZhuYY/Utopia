@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from utopia.core.config import WorldRules
 from utopia.layer5_engine.engine import SimulationResult
+
+_DEFAULT_MAX_TICKS = WorldRules().max_ticks
 
 
 class FindingType(str, Enum):
@@ -174,7 +177,7 @@ def _detect_anomalies(result: SimulationResult) -> list[Finding]:
     findings = []
 
     # Check for rapid convergence
-    if result.converged and result.final_tick < result.final_tick * 0.3:
+    if result.converged and result.final_tick < _DEFAULT_MAX_TICKS * 0.3:
         findings.append(Finding(
             type=FindingType.ANOMALY,
             title="Rapid Convergence",

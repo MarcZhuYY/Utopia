@@ -12,21 +12,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Callable, Coroutine, Optional
 
 from utopia.core.pydantic_models import AsyncLLMCall
 from utopia.core.utils import ExponentialBackoff
-
-
-class CallStatus(Enum):
-    """Status of an LLM call."""
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -94,8 +85,8 @@ class AsyncLLMScheduler:
         self._backoff = ExponentialBackoff(max_attempts=max_retries)
 
         # Request tracking
-        self._pending_calls: dict[str, AsyncLLMCall] = {}
-        self._completed_calls: dict[str, LLMResult] = {}
+        self._pending_count = 0
+        self._completed_count = 0
         self._in_progress: set[str] = set()
 
         # Cache
@@ -138,16 +129,16 @@ class AsyncLLMScheduler:
         timeout = timeout or self.timeout_seconds
 
         # Check cache
-        if use_cache and self.enable_caching:
-            cache_key = self._cache_key(prompt)
-            if cache_key in self._cache:
-                self._cache_hits += 1
-                return LLMResult(
-                    call_id=call_id,
-                    success=True,
-                    content=self._cache[cache_key],
-                    latency_ms=0.0,
-                )
+        cache_key = self._cache_key(prompt) if use_cache and self.enable_caching else ""
+        if cache_key and cache_key in self._cache:
+            self._cache_hits += 1
+            return LLMResult(
+                call_id=call_id,
+                success=True,
+                content=self._cache[cache_key],
+                latency_ms=0.0,
+            )
+        if cache_key:
             self._cache_misses += 1
 
         # Create call record
@@ -158,11 +149,11 @@ class AsyncLLMScheduler:
             tick=0,  # Will be set by caller
             priority=priority,
         )
-        self._pending_calls[call_id] = call
+        self._pending_count += 1
 
         # Execute with semaphore
         async with self._semaphore:
-            return await self._execute_call(call, timeout, use_cache)
+            return await self._execute_call(call, timeout, cache_key)
 
     async def call_batch(
         self,
@@ -188,14 +179,14 @@ class AsyncLLMScheduler:
         self,
         call: AsyncLLMCall,
         timeout: float,
-        use_cache: bool,
+        cache_key: str,
     ) -> LLMResult:
         """Execute single LLM call with retries.
 
         Args:
             call: Call to execute
             timeout: Timeout seconds
-            use_cache: Whether to cache result
+            cache_key: Pre-computed cache key (empty string to skip caching)
 
         Returns:
             LLM result
@@ -228,8 +219,7 @@ class AsyncLLMScheduler:
                 latency_ms = (time.time() - start_time) * 1000
 
                 # Cache result
-                if use_cache and self.enable_caching:
-                    cache_key = self._cache_key(call.prompt)
+                if cache_key:
                     self._cache[cache_key] = response
 
                 # Update stats
@@ -241,7 +231,6 @@ class AsyncLLMScheduler:
                 # Update call record
                 call.status = "completed"
                 call.result = response
-                self._completed_calls[call.call_id] = result
                 self._in_progress.discard(call.call_id)
 
                 result = LLMResult(
@@ -251,17 +240,15 @@ class AsyncLLMScheduler:
                     latency_ms=latency_ms,
                     retries=attempt,
                 )
-                self._completed_calls[call.call_id] = result
+                self._completed_count += 1
                 return result
 
-            except asyncio.TimeoutError:
-                last_error = f"Timeout after {timeout}s"
-                if attempt < self.max_retries:
-                    delay = self._backoff.compute_delay(attempt)
-                    await asyncio.sleep(delay)
-
             except Exception as e:
-                last_error = str(e)
+                last_error = (
+                    f"Timeout after {timeout}s"
+                    if isinstance(e, asyncio.TimeoutError)
+                    else str(e)
+                )
                 if attempt < self.max_retries:
                     delay = self._backoff.compute_delay(attempt)
                     await asyncio.sleep(delay)
@@ -284,7 +271,7 @@ class AsyncLLMScheduler:
             latency_ms=latency_ms,
             retries=self.max_retries,
         )
-        self._completed_calls[call.call_id] = result
+        self._completed_count += 1
         return result
 
     def _generate_call_id(self, prompt: str, agent_id: str) -> str:
@@ -331,9 +318,9 @@ class AsyncLLMScheduler:
             "success_rate": success / total if total > 0 else 0.0,
             "average_latency_ms": avg_latency,
             "total_retries": self._stats["total_retries"],
-            "pending_calls": len(self._pending_calls),
+            "pending_calls": self._pending_count,
             "in_progress": len(self._in_progress),
-            "completed_calls": len(self._completed_calls),
+            "completed_calls": self._completed_count,
             "cache_hits": self._cache_hits,
             "cache_misses": self._cache_misses,
             "cache_hit_rate": (
@@ -363,8 +350,6 @@ class AsyncLLMScheduler:
                 break
             await asyncio.sleep(0.1)
 
-
-from datetime import datetime
 
 
 class RateLimiter:
