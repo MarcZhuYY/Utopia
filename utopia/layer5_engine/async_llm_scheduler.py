@@ -17,6 +17,7 @@ from enum import Enum
 from typing import Any, Callable, Coroutine, Optional
 
 from utopia.core.pydantic_models import AsyncLLMCall
+from utopia.core.utils import ExponentialBackoff
 
 
 class CallStatus(Enum):
@@ -26,34 +27,6 @@ class CallStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
-
-
-@dataclass
-class ExponentialBackoff:
-    """Exponential backoff configuration.
-
-    Delay = base_delay * (2 ^ attempt) + jitter
-    """
-    base_delay: float = 1.0
-    max_delay: float = 60.0
-    jitter: float = 0.1
-    max_attempts: int = 3
-
-    def compute_delay(self, attempt: int) -> float:
-        """Compute delay for given attempt.
-
-        Args:
-            attempt: Attempt number (0-indexed)
-
-        Returns:
-            Delay in seconds
-        """
-        delay = self.base_delay * (2 ** attempt)
-        delay = min(delay, self.max_delay)
-        # Add small jitter to prevent thundering herd
-        import random
-        delay += random.uniform(0, self.jitter)
-        return delay
 
 
 @dataclass

@@ -33,6 +33,7 @@ from utopia.core.pydantic_models import (
     TaskRequest,
     TaskType,
 )
+from utopia.core.utils import ExponentialBackoff
 
 
 # =============================================================================
@@ -105,45 +106,6 @@ FALLBACK_CHAIN: dict[LLMModel, LLMModel] = {
     LLMModel.QWEN_35_PLUS: LLMModel.MINIMAX_M27,
     LLMModel.MINIMAX_M27: None,  # type: ignore  # 主力底座无降级路径
 }
-
-
-# =============================================================================
-# Exponential Backoff
-# =============================================================================
-
-
-@dataclass
-class ExponentialBackoff:
-    """指数退避配置
-
-    Delay = base_delay * (2 ^ attempt) + jitter
-
-    Attributes:
-        base_delay: 基础延迟秒数
-        max_delay: 最大延迟秒数
-        jitter: 抖动范围(随机增加0-jitter秒)
-        max_attempts: 最大重试次数
-    """
-
-    base_delay: float = 1.0
-    max_delay: float = 30.0
-    jitter: float = 0.5
-    max_attempts: int = 3
-
-    def compute_delay(self, attempt: int) -> float:
-        """计算退避延迟
-
-        Args:
-            attempt: 重试次数(0-indexed)
-
-        Returns:
-            延迟秒数
-        """
-        delay = self.base_delay * (2 ** attempt)
-        delay = min(delay, self.max_delay)
-        # 添加抖动防止惊群效应
-        delay += random.uniform(0, self.jitter)
-        return delay
 
 
 # =============================================================================

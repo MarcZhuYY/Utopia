@@ -82,7 +82,7 @@ class MemorySystem3Tier:
         self._vector_index: Optional[np.ndarray] = None
         self._vector_index_dirty: bool = True
 
-        # CRITICAL FIX: Threading locks for vector index safety
+        # Threading locks for vector index safety
         self._vector_lock = threading.RLock()  # Protects vector index
         self._warm_lock = threading.Lock()  # Protects warm memory list
         self._hot_lock = threading.Lock()  # Protects hot memory deque
@@ -249,7 +249,7 @@ class MemorySystem3Tier:
         if query_vector is None:
             return self._search_warm_memory_fallback(query_text or "", topic_id, k)
 
-        # CRITICAL FIX: Thread-safe vector index access
+        # Thread-safe vector index access
         with self._vector_lock:
             # Rebuild if needed
             if self._vector_index_dirty or self._vector_index is None:
@@ -269,7 +269,7 @@ class MemorySystem3Tier:
             if idx >= len(self.warm):
                 continue
 
-            # CRITICAL FIX: Access warm memory under lock
+            # Access warm memory under lock
             with self._warm_lock:
                 warm_item = self.warm[idx]
 
@@ -329,10 +329,7 @@ class MemorySystem3Tier:
         ]
 
     def _rebuild_vector_index_unsafe(self) -> None:
-        """重建向量索引 - 必须在持有 _vector_lock 时调用.
-
-        CRITICAL FIX: Unsafe version - caller must hold lock!
-        """
+        """重建向量索引 - 必须在持有 _vector_lock 时调用 (caller must hold lock)."""
         if not self.warm:
             self._vector_index = None
             self._vector_index_dirty = False
@@ -363,7 +360,7 @@ class MemorySystem3Tier:
         Args:
             embeddings: List of (text, vector, metadata) tuples
         """
-        # CRITICAL FIX: Thread-safe batch embedding reception
+        # Thread-safe batch embedding reception
         with self._warm_lock:
             for text, vector, metadata in embeddings:
                 warm_item = WarmMemoryItem(
@@ -377,7 +374,7 @@ class MemorySystem3Tier:
                 )
                 self.warm.append(warm_item)
 
-        # CRITICAL FIX: Mark index dirty under vector lock
+        # Mark index dirty under vector lock
         with self._vector_lock:
             self._vector_index_dirty = True
 
@@ -386,7 +383,7 @@ class MemorySystem3Tier:
 
     def _enforce_warm_memory_limit(self) -> None:
         """LRU + 重要性淘汰策略."""
-        # CRITICAL FIX: Thread-safe memory limit enforcement
+        # Thread-safe memory limit enforcement
         with self._warm_lock:
             if len(self.warm) <= self.warm_max_size:
                 return
@@ -412,7 +409,7 @@ class MemorySystem3Tier:
             scored.sort(key=lambda x: x[0], reverse=True)
             self.warm = [item for _, item in scored[: self.warm_max_size]]
 
-        # CRITICAL FIX: Mark index dirty under vector lock
+        # Mark index dirty under vector lock
         with self._vector_lock:
             self._vector_index_dirty = True
 

@@ -137,7 +137,7 @@ class WorldStateBuffer:
         # Pending action buffer
         self._action_buffer: list[ActionBufferEntry] = []
 
-        # CRITICAL FIX: Add locks for thread-safe operations
+        # Locks for thread-safe operations
         self._buffer_lock = asyncio.Lock()  # Protects buffer swap operations
         self._action_lock = asyncio.Lock()  # Protects action buffer
 
@@ -234,8 +234,6 @@ class WorldStateBuffer:
     ) -> None:
         """Buffer an action for next tick.
 
-        CRITICAL FIX: Now async with proper locking for thread safety.
-
         Args:
             action: Action to buffer
             priority: Execution priority (higher = earlier)
@@ -246,7 +244,7 @@ class WorldStateBuffer:
             priority=priority,
         )
 
-        # CRITICAL FIX: Thread-safe action buffering
+        # Thread-safe action buffering
         async with self._action_lock:
             self._action_buffer.append(entry)
             # Keep sorted by priority
@@ -255,14 +253,12 @@ class WorldStateBuffer:
     async def commit_buffered_actions(self) -> list[ActionWithTrace]:
         """Commit all buffered actions to write state.
 
-        CRITICAL FIX: Now async with proper locking for thread safety.
-
         Returns:
             List of committed actions
         """
         committed = []
 
-        # CRITICAL FIX: Thread-safe action commit
+        # Thread-safe action commit
         async with self._action_lock:
             for entry in self._action_buffer:
                 self._write_state.committed_actions.append(entry.action)
@@ -287,9 +283,7 @@ class WorldStateBuffer:
     async def swap_buffers(self) -> WorldStateSnapshot:
         """Swap read and write buffers atomically.
 
-        CRITICAL FIX: Now async with proper locking to ensure true atomicity.
-
-        This is the critical operation that ensures causal consistency:
+        This operation ensures causal consistency:
         1. Archive current read state to history
         2. Swap read/write pointers (under lock)
         3. Reset write state as copy of new read state
@@ -298,7 +292,7 @@ class WorldStateBuffer:
         Returns:
             Snapshot of committed state
         """
-        # CRITICAL FIX: Atomic buffer swap under lock
+        # Atomic buffer swap under lock
         async with self._buffer_lock:
             # Archive current read state
             snapshot = self._read_state.to_snapshot()
@@ -435,8 +429,6 @@ class TickCoordinator:
     async def run_tick(self) -> WorldStateSnapshot:
         """Execute single simulation tick.
 
-        CRITICAL FIX: Now async to support atomic buffer operations.
-
         Flow:
         1. All agents read from read_state (consistent view)
         2. All agents write to write_state (isolated changes)
@@ -457,10 +449,10 @@ class TickCoordinator:
             for callback in self._tick_callbacks:
                 callback(self.buffer)
 
-            # CRITICAL FIX: Await async commit
+            # Await async commit
             await self.buffer.commit_buffered_actions()
 
-            # CRITICAL FIX: Await async buffer swap with lock protection
+            # Await async buffer swap with lock protection
             snapshot = await self.buffer.swap_buffers()
 
             return snapshot
@@ -470,8 +462,6 @@ class TickCoordinator:
 
     async def run_ticks(self, n: int) -> list[WorldStateSnapshot]:
         """Run multiple ticks.
-
-        CRITICAL FIX: Now async to support atomic buffer operations.
 
         Args:
             n: Number of ticks to run

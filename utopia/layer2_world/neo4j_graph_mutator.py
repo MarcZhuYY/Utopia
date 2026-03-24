@@ -18,6 +18,13 @@ from tenacity import (
     wait_exponential,
 )
 
+# Neo4j exceptions for retry (imported conditionally for mock mode support)
+try:
+    from neo4j.exceptions import Neo4jError
+    _NEO4J_EXCEPTIONS = (Neo4jError,)
+except ImportError:
+    _NEO4J_EXCEPTIONS = ()
+
 from utopia.layer2_world.world_events import (
     NodePropertyUpdateEvent,
     OpinionCreateEvent,
@@ -76,8 +83,6 @@ class Neo4jGraphMutator:
         """
         Initialize Neo4j mutator.
 
-        CRITICAL FIX: Added connection timeout to prevent infinite waits.
-
         Args:
             neo4j_uri: Neo4j Bolt URI
             neo4j_user: Neo4j username
@@ -89,7 +94,7 @@ class Neo4jGraphMutator:
         try:
             from neo4j import AsyncGraphDatabase
 
-            # CRITICAL FIX: Connection timeout prevents hanging on network issues
+            # Connection timeout prevents hanging on network issues
             self._driver = AsyncGraphDatabase.driver(
                 neo4j_uri,
                 auth=(neo4j_user, neo4j_password),
@@ -103,14 +108,16 @@ class Neo4jGraphMutator:
         self._initialized = True
         self._transaction_count = 0
         self._events_processed = 0
-        # CRITICAL FIX: Dead letter queue for failed events
+        # Dead letter queue for failed events
         self._dead_letter_queue: asyncio.Queue[WorldEvent] = asyncio.Queue()
         self._max_transaction_time = 30.0  # 30 second transaction timeout
 
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1.0, min=1.0, max=10.0),
-        retry=retry_if_exception_type((Neo4jBatchError, Exception)),
+        retry=retry_if_exception_type(
+            (Neo4jBatchError, ConnectionError, TimeoutError, OSError) + _NEO4J_EXCEPTIONS
+        ),
         reraise=True,
     )
     async def flush_events(self, events: list["WorldEvent"]) -> dict[str, Any]:
@@ -118,9 +125,6 @@ class Neo4jGraphMutator:
         Batch write events to Neo4j with retry mechanism.
 
         Core requirement: MUST use UNWIND syntax, single transaction batch!
-
-        CRITICAL FIX: Added retry with exponential backoff and dead letter queue
-        for failed events.
 
         Performance guarantee:
             50 agents × 50 events = 1 transaction
@@ -169,7 +173,7 @@ class Neo4jGraphMutator:
         try:
             async with self._driver.session() as session:
                 # Single transaction for all events with timeout (if supported)
-                # CRITICAL FIX: Handle both real Neo4j (supports timeout) and mocks
+                # Handle both real Neo4j (supports timeout) and mocks
                 try:
                     tx_context = session.begin_transaction(timeout=self._max_transaction_time)
                 except TypeError:
@@ -226,7 +230,7 @@ class Neo4jGraphMutator:
                         raise Neo4jBatchError(f"Batch transaction failed: {e}") from e
 
         except Neo4jBatchError:
-            # CRITICAL FIX: Put failed events into dead letter queue for later retry
+            # Put failed events into dead letter queue for later retry
             for event in dead_letter_events:
                 await self._dead_letter_queue.put(event)
             raise
@@ -426,10 +430,7 @@ class Neo4jGraphMutator:
             await self._driver.close()
 
     def get_stats(self) -> dict[str, Any]:
-        """
-        Get processing statistics.
-
-        CRITICAL FIX: Added dead_letter_queue size to stats.
+        """Get processing statistics.
 
         Returns:
             Dict with transaction_count, events_processed, avg_events_per_tx,
@@ -447,8 +448,6 @@ class Neo4jGraphMutator:
 
     async def retry_dead_letter_events(self) -> dict[str, Any]:
         """Retry events from dead letter queue.
-
-        CRITICAL FIX: Allows recovery of failed events.
 
         Returns:
             Dict with retry_count, success_count, failed_count
