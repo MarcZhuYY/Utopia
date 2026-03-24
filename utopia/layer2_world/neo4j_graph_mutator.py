@@ -2,15 +2,21 @@
 
 Centralized writer using UNWIND syntax for batch operations.
 Single transaction per tick eliminates write lock contention.
-Includes retry mechanism with exponential backoff for resilience.
+Uses tenacity for retry with exponential backoff.
 """
 
 from __future__ import annotations
 
 import asyncio
-import functools
 import logging
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Optional
+
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from utopia.layer2_world.world_events import (
     NodePropertyUpdateEvent,
@@ -21,60 +27,12 @@ from utopia.layer2_world.world_events import (
 )
 
 logger = logging.getLogger(__name__)
-T = TypeVar("T")
 
 
 class Neo4jBatchError(Exception):
     """Neo4j batch processing error."""
 
     pass
-
-
-def with_retry(
-    max_retries: int = 3,
-    base_delay: float = 1.0,
-    max_delay: float = 10.0,
-    exceptions: tuple[type[Exception], ...] = (Exception,),
-) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """Decorator for retry with exponential backoff.
-
-    CRITICAL FIX: Prevents event loss on transient network failures.
-
-    Args:
-        max_retries: Maximum number of retry attempts
-        base_delay: Initial delay between retries (seconds)
-        max_delay: Maximum delay between retries (seconds)
-        exceptions: Tuple of exceptions to catch and retry
-    """
-
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        @functools.wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> T:
-            last_exception: Optional[Exception] = None
-
-            for attempt in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except exceptions as e:
-                    last_exception = e
-                    if attempt < max_retries - 1:
-                        # Exponential backoff with jitter
-                        delay = min(base_delay * (2 ** attempt), max_delay)
-                        logger.warning(
-                            f"{func.__name__} failed (attempt {attempt + 1}/{max_retries}), "
-                            f"retrying in {delay:.1f}s: {e}"
-                        )
-                        await asyncio.sleep(delay)
-                    else:
-                        break
-
-            raise Neo4jBatchError(
-                f"Failed after {max_retries} attempts: {last_exception}"
-            ) from last_exception
-
-        return wrapper
-
-    return decorator
 
 
 class Neo4jGraphMutator:
@@ -149,10 +107,11 @@ class Neo4jGraphMutator:
         self._dead_letter_queue: asyncio.Queue[WorldEvent] = asyncio.Queue()
         self._max_transaction_time = 30.0  # 30 second transaction timeout
 
-    @with_retry(
-        max_retries=3,
-        base_delay=1.0,
-        exceptions=(Neo4jBatchError, Exception),  # Retry on any exception
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1.0, min=1.0, max=10.0),
+        retry=retry_if_exception_type((Neo4jBatchError, Exception)),
+        reraise=True,
     )
     async def flush_events(self, events: list["WorldEvent"]) -> dict[str, Any]:
         """

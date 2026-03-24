@@ -1,0 +1,15 @@
+Phase 2-4 cleanup: Simplify over-engineering
+
+Phase 2 (Model System):
+- Add deprecation notice to core/models.py docstring
+- Recommend pydantic_models.py for new code
+
+Phase 4 (Simplify over-engineering):
+- Replace custom with_retry decorator with tenacity library
+  - Use @retry with stop_after_attempt and wait_exponential
+  - Reduces ~45 lines of custom retry logic
+- Remove unused _vector_index_context context manager from memory.py
+  - Was defined but never used
+  - Reduces ~15 lines of dead code
+
+Tests: 199 passed, 1 failed (performance threshold)

@@ -1,5 +1,9 @@
 """Core data models for Utopia simulation system.
 
+DEPRECATED: This module uses dataclass models. For new code, use
+utopia.core.pydantic_models which provides Pydantic v2 models with
+strict validation and better performance.
+
 These models implement the data structures defined in the Multi-Agent Simulation
 System design document (v1.0, 2026-03-22).
 """

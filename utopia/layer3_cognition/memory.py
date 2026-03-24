@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Generator, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
@@ -87,21 +86,6 @@ class MemorySystem3Tier:
         self._vector_lock = threading.RLock()  # Protects vector index
         self._warm_lock = threading.Lock()  # Protects warm memory list
         self._hot_lock = threading.Lock()  # Protects hot memory deque
-
-    @contextmanager
-    def _vector_index_context(self) -> Generator[Optional[np.ndarray], None, None]:
-        """Context manager for thread-safe vector index access.
-
-        CRITICAL FIX: Ensures exclusive access during index rebuild and search.
-
-        Yields:
-            Current vector index (may be None if empty)
-        """
-        with self._vector_lock:
-            # Rebuild if needed (under lock)
-            if self._vector_index_dirty or self._vector_index is None:
-                self._rebuild_vector_index_unsafe()
-            yield self._vector_index
 
     def add_experience(
         self,
