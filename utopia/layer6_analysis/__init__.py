@@ -1,6 +1,6 @@
 """L6: Result Analysis Layer.
 
-This layer generates simulation reports and extracts key findings.
+This layer generates simulation reports and collects metrics.
 """
 
 from utopia.layer6_analysis.report_generator import ReportGenerator, SimulationReport
@@ -17,7 +17,6 @@ __all__ = [
     "Finding",
     "FindingType",
     "extract_findings",
-    # Phase 11: Metrics Collector + Alpha Factors
     "SimulationMetricsCollector",
     "TickMetrics",
     "TimeSeriesFactors",
