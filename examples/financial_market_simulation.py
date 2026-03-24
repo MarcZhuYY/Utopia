@@ -63,15 +63,12 @@ class MarketSimulationEngine:
         """Initialize agents with market seed."""
         print("[INIT] Creating market agent population...")
 
-        # Create population
-        population_config = {
-            "retail": self.num_retail,
-            "quant": self.num_quant,
-            "insider": self.num_insider,
-            "regulator": self.num_regulator,
-        }
-
-        agents_list = AgentFactory.create_batch(population_config)
+        # Create population: retail + quant + insider + regulator
+        retailers = AgentFactory.create_batch("retail", self.num_retail, "RETAIL")
+        quants = AgentFactory.create_batch("quant", self.num_quant, "QUANT")
+        insiders = AgentFactory.create_batch("insider", self.num_insider, "INSIDER")
+        regulators = AgentFactory.create_batch("regulator", self.num_regulator, "CSRC")
+        agents_list = retailers + quants + insiders + regulators
         for agent in agents_list:
             self.agents[agent.agent_id] = agent
 

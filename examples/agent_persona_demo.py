@@ -91,12 +91,11 @@ def demo_batch_creation():
     print("=" * 60)
 
     # Create a market population: 70 retail + 15 quant + 10 insider + 1 regulator
-    population = AgentFactory.create_batch({
-        "retail": 70,
-        "quant": 15,
-        "insider": 10,
-        "regulator": 1,
-    })
+    retailers = AgentFactory.create_batch("retail", 70, "RETAIL")
+    quants = AgentFactory.create_batch("quant", 15, "QUANT")
+    insiders = AgentFactory.create_batch("insider", 10, "INSIDER")
+    regulators = AgentFactory.create_batch("regulator", 1, "CSRC")
+    population = retailers + quants + insiders + regulators
 
     print(f"\nCreated population of {len(population)} agents:")
 
